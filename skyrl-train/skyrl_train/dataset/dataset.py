@@ -21,6 +21,7 @@ class PromptDataset:
         self.env_class_key = env_class_key
         self.num_workers = num_workers
         self._read_files_and_tokenize()
+        print(f"CHARLIE self.data_files: {self.data_files}")
 
     def _read_files_and_tokenize(self):
         dataframes = []

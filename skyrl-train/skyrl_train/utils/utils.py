@@ -133,8 +133,6 @@ def validate_cfg(cfg: DictConfig):
         assert (
             cfg.generator.batched
         ), "if we are using the offline engine, we need to put generator in batched mode for faster generation"
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        raise ValueError("SGLang backend currently does not support local engines")
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
