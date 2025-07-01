@@ -42,13 +42,13 @@ dependencies = [
 ]
 
 [tool.uv]
-override-dependencies = ["ray==2.44.0"]
-conflicts = [
-    [
-        { extra = "vllm" },
-        { extra = "sglang" },
-    ],
+override-dependencies = [
+    "ray==2.44.0",
+    # Force xgrammar version to resolve sglang/vllm conflict, where vllm 0.8.5 depends
+    # on 0.1.18 and sglang 0.4.6.post5 on 0.1.19
+    "xgrammar==0.1.19",
 ]
+
 
 [project.optional-dependencies]
 dev = [
@@ -73,8 +73,9 @@ vllm = [
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
 ]
 sglang = [
-    "sglang[srt,openai]==0.4.6.post4",
+    "sglang[srt,openai]==0.4.6.post5",
     "torch-memory-saver>=0.0.5",
+    "vllm==0.8.5",  # SGLang depends on VLLM internally
     # The version is pinned to 0.2.5 because sglang requires this
     # NOTE (sumanthrh): This can be made a common dependency, but then different inference engines can pin different compatible flashinfer versions and it might quickly break.
     "flashinfer-python@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.2.5/flashinfer_python-0.2.5+cu124torch2.6-cp38-abi3-linux_x86_64.whl#sha256=43d767b912c0c43a04be99595e0123eab9385fc72530a2874b5fb08e3145c0be",
