@@ -12,16 +12,16 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
+uv run --isolated --extra sglang -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
-  trainer.policy.model.path="Qwen/Qwen2.5-1.5B-Instruct" \
+  trainer.policy.model.path="Qwen/Qwen2.5-0.5B-Instruct" \
   trainer.placement.colocate_all=true \
   trainer.strategy=fsdp2 \
-  trainer.placement.policy_num_gpus_per_node=$NUM_GPUS \
-  trainer.placement.ref_num_gpus_per_node=$NUM_GPUS \
-  generator.num_inference_engines=$NUM_GPUS \
+  trainer.placement.policy_num_gpus_per_node=4 \
+  trainer.placement.ref_num_gpus_per_node=4 \
+  generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=1 \
   trainer.epochs=20 \
   trainer.eval_batch_size=1024 \
@@ -37,7 +37,7 @@ uv run --isolated --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=1024 \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.algorithm.use_kl_loss=true \
-  generator.backend=vllm \
+  generator.backend=sglang \
   generator.run_engines_locally=true \
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
