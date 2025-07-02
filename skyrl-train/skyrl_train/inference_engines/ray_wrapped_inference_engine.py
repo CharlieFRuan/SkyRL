@@ -62,21 +62,27 @@ def create_ray_wrapped_inference_engines(
     max_model_len: int,
     shared_pg=None,
     gpu_memory_utilization=None,
-    vllm_enable_sleep=False,
+    inference_engine_enable_sleep=False,
     async_engine=False,
     max_num_batched_tokens=8192,
     max_num_seqs=1024,
     sampling_params: Optional[Dict[str, Any]] = None,
     tokenizer=None,
+    backend="vllm",
 ):
     """
     Create a list of RayWrappedInferenceEngine instances wrapping Ray actor handles to InferenceEngineInterface instances.
     """
-    import vllm
-    from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
 
-    assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
+    if backend == "vllm":
+        import vllm
+        from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+        assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
+    elif backend == "sglang":
+        from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
     inference_engine_actors = []
     noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
     # NOTE: we use the ray backend for tensor parallel size > 1 to explicitly manage resource allocation
@@ -106,42 +112,69 @@ def create_ray_wrapped_inference_engines(
             placement_group_bundle_index=i * tensor_parallel_size,
         )
 
-        if async_engine:
-            actor_class = AsyncVLLMRayActor
-        else:
-            actor_class = VLLMRayActor
+        print(f"num_gpus: {num_gpus}")
 
-        vllm_engine = actor_class.options(
-            num_cpus=num_gpus,
-            num_gpus=num_gpus,
-            scheduling_strategy=scheduling_strategy,
-        ).remote(
-            model=pretrain,
-            enforce_eager=enforce_eager,
-            worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
-            tensor_parallel_size=tensor_parallel_size,
-            seed=seed + i,
-            distributed_executor_backend=distributed_executor_backend,
-            max_model_len=max_model_len,
-            enable_prefix_caching=enable_prefix_caching,
-            dtype=model_dtype,
-            trust_remote_code=True,
-            vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
-            gpu_memory_utilization=gpu_memory_utilization,
-            bundle_indices=bundle_indices,
-            num_gpus=0.2 if use_hybrid_engine else 1,
-            enable_sleep_mode=vllm_enable_sleep,
-            noset_visible_devices=noset_visible_devices,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_num_seqs=max_num_seqs,
-            sampling_params=sampling_params,
-            tokenizer=tokenizer,
-        )
-        inference_engine_actors.append(vllm_engine)
+        if backend == "vllm":
+            if async_engine:
+                actor_class = AsyncVLLMRayActor
+            else:
+                actor_class = VLLMRayActor
+
+            engine = actor_class.options(
+                num_cpus=num_gpus,
+                num_gpus=num_gpus,
+                scheduling_strategy=scheduling_strategy,
+            ).remote(
+                model=pretrain,
+                enforce_eager=enforce_eager,
+                worker_extension_cls="skyrl_train.inference_engines.vllm.vllm_engine.WorkerWrap",
+                tensor_parallel_size=tensor_parallel_size,
+                seed=seed + i,
+                distributed_executor_backend=distributed_executor_backend,
+                max_model_len=max_model_len,
+                enable_prefix_caching=enable_prefix_caching,
+                dtype=model_dtype,
+                trust_remote_code=True,
+                vllm_v1_disable_multiproc=vllm_v1_disable_multiproc,
+                gpu_memory_utilization=gpu_memory_utilization,
+                bundle_indices=bundle_indices,
+                num_gpus=0.2 if use_hybrid_engine else 1,
+                enable_sleep_mode=inference_engine_enable_sleep,
+                noset_visible_devices=noset_visible_devices,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_num_seqs=max_num_seqs,
+                sampling_params=sampling_params,
+                tokenizer=tokenizer,
+            )
+        elif backend == "sglang":
+            # TODO(Charlie): SGLang doesn't support async engine yet
+            if async_engine:
+                print("Warning: SGLang doesn't support async engine, using sync engine")
+
+            actor_class = SGLangRayActor
+            engine = actor_class.options(
+                num_cpus=num_gpus,
+                num_gpus=num_gpus,
+                scheduling_strategy=scheduling_strategy,
+            ).remote(
+                model=pretrain,
+                tensor_parallel_size=tensor_parallel_size,
+                seed=seed + i,
+                max_model_len=max_model_len,
+                dtype=model_dtype,
+                trust_remote_code=True,
+                bundle_indices=bundle_indices,
+                num_gpus=0.2 if use_hybrid_engine else 1,
+                noset_visible_devices=noset_visible_devices,
+                sampling_params=sampling_params,
+                tokenizer=tokenizer,
+            )
+        
+        inference_engine_actors.append(engine)
 
     engines = [RayWrappedInferenceEngine(actor_handle) for actor_handle in inference_engine_actors]
 
-    if vllm_enable_sleep:
+    if inference_engine_enable_sleep:
         sleep_refs = [engine.inference_engine_actor.sleep.remote() for engine in engines]
         ray.get(sleep_refs)
 

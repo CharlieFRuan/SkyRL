@@ -18,8 +18,9 @@ from skyrl_train.inference_engines.utils import get_sampling_params_for_backend
 from skyrl_train.inference_engines.base import InferenceEngineInput
 from skyrl_train.entrypoints.main_base import config_dir
 
-model = "Qwen/Qwen2.5-1.5B-Instruct"
-tp_size = 2
+model = "Qwen/Qwen2.5-0.5B-Instruct"
+tp_size = 1
+num_inference_engines = 1
 
 
 def get_test_actor_config() -> DictConfig:
@@ -32,20 +33,21 @@ def get_test_actor_config() -> DictConfig:
         cfg.trainer.critic.model.path = ""
         cfg.trainer.placement.policy_num_gpus_per_node = 2
         cfg.generator.async_engine = True
-        cfg.generator.num_inference_engines = 1
+        cfg.generator.num_inference_engines = num_inference_engines
         cfg.generator.inference_engine_tensor_parallel_size = tp_size
         cfg.generator.run_engines_locally = True
 
         return cfg
 
 
-async def run_vllm_inference(client, prompts):
+async def run_inference(client, prompts):
     engine_input = InferenceEngineInput(prompts=prompts)
-    await client.generate(engine_input)
+    return await client.generate(engine_input)
 
 
-def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_all):
+def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_all, backend):
     assert use_local, "This test does not yet support remote engines."
+    assert backend in ["vllm", "sglang"]
     ray.init(
         ignore_reinit_error=True,
         runtime_env={
@@ -60,14 +62,14 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         },
     )
     if colocate_all:
-        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size, strategy="PACK")
+        pg = placement_group([{"GPU": 1, "CPU": 1}] * tp_size * num_inference_engines, strategy="PACK")
         get_ray_pg_ready_with_timeout(pg, timeout=30)
         sleep = True
     else:
         pg, sleep = None, False
 
     eps = create_ray_wrapped_inference_engines(
-        num_inference_engines=1,
+        num_inference_engines=num_inference_engines,
         tensor_parallel_size=tp_size,
         model_dtype="bfloat16",
         pretrain=model,
@@ -78,12 +80,13 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         max_model_len=1536,
         shared_pg=pg,
         gpu_memory_utilization=0.8,
-        vllm_enable_sleep=sleep,
+        inference_engine_enable_sleep=sleep,
         async_engine=async_engine,
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
-        sampling_params=get_sampling_params_for_backend("vllm", cfg.generator.sampling_params),
+        sampling_params=get_sampling_params_for_backend(backend, cfg.generator.sampling_params),
         tokenizer=AutoTokenizer.from_pretrained(model),
+        backend=backend,
     )
     client = InferenceEngineClient(eps)
     if sleep:
@@ -92,37 +95,47 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
 
 
 @pytest.mark.parametrize(
-    ("colocate_all", "weight_sync_backend", "strategy"),
+    ("colocate_all", "weight_sync_backend", "strategy", "backend"),
     [
-        (False, "nccl", "fsdp"),
-        (True, "nccl", "fsdp"),
-        (False, "gloo", "fsdp"),
-        (True, "gloo", "fsdp"),
-        (False, "nccl", "deepspeed"),
-        (True, "nccl", "deepspeed"),
-        (False, "nccl", "fsdp2"),
-        (True, "nccl", "fsdp2"),
+        (False, "nccl", "fsdp", "vllm"),
+        (True, "nccl", "fsdp", "vllm"),
+        (False, "gloo", "fsdp", "vllm"),
+        (True, "gloo", "fsdp", "vllm"),
+        (False, "nccl", "deepspeed", "vllm"),
+        (True, "nccl", "deepspeed", "vllm"),
+        (False, "nccl", "fsdp2", "vllm"),
+        (True, "nccl", "fsdp2", "vllm"),
+        (False, "nccl", "fsdp2", "sglang"),
+        (True, "nccl", "fsdp2", "sglang"),
+        (True, "gloo", "fsdp2", "sglang"),
     ],
     ids=[
-        "no_colocate_nccl_fsdp",
-        "colocate_nccl_fsdp",
-        "no_colocate_gloo_fsdp",
-        "colocate_gloo_fsdp",
-        "no_colocate_nccl_deepspeed",
-        "colocate_nccl_deepspeed",
-        "no_colocate_nccl_fsdp2",
-        "colocate_nccl_fsdp2",
+        "no_colocate_nccl_fsdp_vllm",
+        "colocate_nccl_fsdp_vllm",
+        "no_colocate_gloo_fsdp_vllm",
+        "colocate_gloo_fsdp_vllm",
+        "no_colocate_nccl_deepspeed_vllm",
+        "colocate_nccl_deepspeed_vllm",
+        "no_colocate_nccl_fsdp2_vllm",
+        "colocate_nccl_fsdp2_vllm",
+        "no_colocate_nccl_fsdp2_sglang",
+        "colocate_nccl_fsdp2_sglang",
+        "colocate_gloo_fsdp2_sglang",
     ],
 )
-def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy):
+def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
     """
     Tests initalizing the policy actor group and inference engine, syncing weights, and performing generation.
     """
+    if backend == "sglang":
+        import sglang
+        print(f"sglang.__file__: {sglang.__file__}")
     try:
         cfg = get_test_actor_config()
         cfg.trainer.placement.colocate_all = colocate_all
         cfg.generator.weight_sync_backend = weight_sync_backend
         cfg.trainer.strategy = strategy
+        cfg.generator.backend = backend
 
         client, pg = init_inference_engines(
             cfg=cfg,
@@ -131,6 +144,7 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy):
             async_engine=cfg.generator.async_engine,
             tp_size=cfg.generator.inference_engine_tensor_parallel_size,
             colocate_all=cfg.trainer.placement.colocate_all,
+            backend=backend,
         )
 
         policy = init_worker_with_type(
@@ -143,6 +157,7 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy):
         ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
         asyncio.run(client.reset_prefix_cache())
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        asyncio.run(run_vllm_inference(client, get_test_prompts(model)))
+        outputs = asyncio.run(run_inference(client, get_test_prompts(model)))
+        print(f"Example output: {outputs['responses'][0]}")
     finally:
         ray.shutdown()

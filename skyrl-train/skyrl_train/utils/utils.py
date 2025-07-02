@@ -133,8 +133,6 @@ def validate_cfg(cfg: DictConfig):
         assert (
             cfg.generator.batched
         ), "if we are using the offline engine, we need to put generator in batched mode for faster generation"
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        raise ValueError("SGLang backend currently does not support local engines")
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -252,6 +250,12 @@ def initialize_ray(cfg: DictConfig):
         )
         env_vars["VLLM_USE_V1"] = "1"
         env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    
+    # if cfg.generator.backend == "sglang":
+    #     # SGLang has a known conflict with Ray's device isolation mechanism
+    #     # This environment variable resolves the device detection issue
+    #     logger.info("Setting ENSURE_CUDA_VISIBLE_DEVICES for SGLang device isolation fix")
+    #     env_vars["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
 
     # TODO: this can be removed if we standardize on env files.
     # But it's helpful for a quickstart
