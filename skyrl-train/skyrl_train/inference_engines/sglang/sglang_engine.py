@@ -140,6 +140,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         
         # Create SGLang ServerArgs from kwargs
         server_args_dict = self._convert_kwargs_to_server_args(args, kwargs)
+        
+        # TODO(Charlie): Turn it on only obeying to the colocate_all config flag
+        server_args_dict["enable_memory_saver"] = True
+
         # server_args = ServerArgs(**server_args_dict)
         
         # Create the SGLang engine (signal handler issue is now fixed by patching)
@@ -296,8 +300,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     async def wake_up(self, tags: Optional[List[str]] = None):
         """Wake up the engine. For multi-stage waking up, pass in `"weight"` or `"kv_cache"` to tags."""
-        dummy_obj = ResumeMemoryOccupationReqInput(tags=["weight"])
-        print("CHARLIE DUMMY OBJ: ", dummy_obj)
         # # because __init__ is a sync method, it can not call the async release_memory_occupation
         # # have to move release_memory_occupation from __init__ to here
         # # For multi-stage awake, we run release weight and kv_cache when we resume weights for the first time.
@@ -309,21 +311,21 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             obj = ResumeMemoryOccupationReqInput()
         else:
             obj = ResumeMemoryOccupationReqInput(tags=tags)
-        print("CHARLIE SGLANG ENGINE WAKE UP WITH TAGS: ", tags)
+        print("CHARLIE SGLANG ENGINE WAKE UP WITH TAGS: ", tags, flush=True)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
-        return await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
+        await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
+        print("CHARLIE SGLANG ENGINE WAKE UP COMPLETED", flush=True)
 
     async def sleep(self, tags: Optional[List[str]] = None):
         """Put engine to sleep."""
-        dummy_obj = ReleaseMemoryOccupationReqInput(tags=["weight"])
-        print("CHARLIE DUMMY OBJ: ", dummy_obj)
         if tags is None:
             obj = ReleaseMemoryOccupationReqInput()
         else:
             obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
-        print("CHARLIE SGLANG ENGINE SLEEP WITH TAGS: ", tags)
-        return await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
+        print("CHARLIE SGLANG ENGINE SLEEP WITH TAGS: ", tags, flush=True)
+        await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
+        print("CHARLIE SGLANG ENGINE SLEEP COMPLETED", flush=True)
 
 
     async def teardown(self):

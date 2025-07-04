@@ -7,6 +7,8 @@ import asyncio
 import ray
 import hydra
 from omegaconf import DictConfig
+import torch
+import time
 
 from tests.gpu.utils import init_worker_with_type, get_test_prompts
 from skyrl_train.inference_engines.ray_wrapped_inference_engine import create_ray_wrapped_inference_engines
@@ -108,6 +110,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         (False, "nccl", "fsdp2", "sglang"),
         (True, "nccl", "fsdp2", "sglang"),
         (True, "gloo", "fsdp2", "sglang"),
+        (True, "gloo", "fsdp2", "vllm"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -121,6 +124,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         "no_colocate_nccl_fsdp2_sglang",
         "colocate_nccl_fsdp2_sglang",
         "colocate_gloo_fsdp2_sglang",
+        "colocate_gloo_fsdp2_vllm",
     ],
 )
 def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
@@ -137,6 +141,7 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
         cfg.trainer.strategy = strategy
         cfg.generator.backend = backend
 
+        # If colocate is True, this will load the engine, sleep, and wake up the engine
         client, pg = init_inference_engines(
             cfg=cfg,
             v1=True,
@@ -147,17 +152,40 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
             backend=backend,
         )
 
-        policy = init_worker_with_type(
-            "policy",
-            shared_pg=pg,
-            colocate_all=cfg.trainer.placement.colocate_all,
-            num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
-            cfg=cfg,
-        )
-        ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
-        asyncio.run(client.reset_prefix_cache())
-        ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
-        outputs = asyncio.run(run_inference(client, get_test_prompts(model)))
-        print(f"Example output: {outputs['responses'][0]}")
+        # print GPU memory usage here
+        print(f"Free GPU memory BEFORE SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+
+        # sleep here to test
+        asyncio.run(client.sleep())
+
+        # print GPU memory usage here
+        print(f"Free GPU memory AFTER SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+
+        time.sleep(10)
+        print(f"Free GPU memory AFTER WAITING 10 seconds: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+
+        # # wake up here to test
+        # if colocate_all:
+        #     asyncio.run(client.wake_up())
+
+        # # print GPU memory usage here
+        # print(f"Free GPU memory AFTER WAKE UP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+        
+
+        # policy = init_worker_with_type(
+        #     "policy",
+        #     shared_pg=pg,
+        #     colocate_all=cfg.trainer.placement.colocate_all,
+        #     num_gpus_per_node=cfg.generator.inference_engine_tensor_parallel_size,
+        #     cfg=cfg,
+        # )
+        # ray.get(policy.async_run_ray_method("pass_through", "init_weight_sync_state", client))
+        # asyncio.run(client.reset_prefix_cache())
+        # ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
+        # outputs = asyncio.run(run_inference(client, get_test_prompts(model)))
+
+
+
+        # print(f"Example output: {outputs['responses'][0]}")
     finally:
         ray.shutdown()
