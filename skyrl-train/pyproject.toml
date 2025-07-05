@@ -41,13 +41,7 @@ dependencies = [
 ]
 
 [tool.uv]
-override-dependencies = [
-    "ray==2.44.0",
-    # TODO(Charlie): remove this once we remove vllm from sglang dependencies
-    "torch==2.7.1",
-    "torchaudio==2.7.1",
-    "torchvision==0.22.1",
-]
+override-dependencies = ["ray==2.44.0"]
 conflicts = [
     [
         { extra = "vllm" },
@@ -83,8 +77,6 @@ sglang = [
     # Referred to SGLang's bump in verl: https://github.com/volcengine/verl/pull/2187
     "flash-attn@https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.0.post2/flash_attn-2.8.0.post2+cu12torch2.7cxx11abiFALSE-cp312-cp312-linux_x86_64.whl",
     "flashinfer-python==0.2.6.post1",
-    # TODO(Charlie): shouldn't be needed; somehow ran into path where is_cuda() is false, fix later
-    "vllm==0.9.1",
 ]
 
 

@@ -140,12 +140,10 @@ class RayPPOTrainer:
         concat_uids: List[str] = []
         sampling_params = self.cfg.generator.eval_sampling_params
         for _, prompts in enumerate(self.eval_dataloader):
-            prompts = self._remove_tail_data(prompts)
             generator_input, uids = self._prepare_generator_input(
                 self.cfg.generator.eval_n_samples_per_prompt, prompts, sampling_params
             )
-            with Timer("generate"):
-                generator_output: GeneratorOutput = await self.generate(generator_input)
+            generator_output: GeneratorOutput = await self.generate(generator_input)
             generator_outputs.append(generator_output)
             concat_all_envs.extend(generator_input["env_classes"])
             concat_env_extras.extend(generator_input["env_extras"])

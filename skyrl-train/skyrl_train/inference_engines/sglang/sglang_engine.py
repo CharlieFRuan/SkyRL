@@ -9,7 +9,6 @@ import threading
 import multiprocessing as mp
 
 from sglang.srt.entrypoints.engine import Engine
-from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import (
     assert_pkg_version,
     is_cuda,
@@ -17,7 +16,6 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
-# from sglang.srt.managers.io_struct import UpdateWeightsFromDistributedReqInput, InitWeightsUpdateGroupReqInput
 from sglang.srt.managers.tokenizer_manager import (
     UpdateWeightsFromDistributedReqInput,
     InitWeightsUpdateGroupReqInput,
@@ -131,53 +129,40 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         self._need_reload = True
 
         # Store common attributes
-        self._tp_size = kwargs.get("tensor_parallel_size", 1)
+        self._tp_size = kwargs.get("tp_size", 1)
         self.tokenizer = kwargs.pop("tokenizer", None)
         
         # Extract sampling params
         sampling_params_dict = kwargs.pop("sampling_params", None)
         self.sampling_params = sampling_params_dict or {}
-        
-        # Create SGLang ServerArgs from kwargs
-        server_args_dict = self._convert_kwargs_to_server_args(args, kwargs)
-        
-        # TODO(Charlie): Turn it on only obeying to the colocate_all config flag
-        server_args_dict["enable_memory_saver"] = True
 
-        # server_args = ServerArgs(**server_args_dict)
+        # Unused kwargs
+        num_gpus = kwargs.pop("num_gpus", 1)
+        bundle_indices = kwargs.pop("bundle_indices", None)
+
+        # TODO(Charlie): From `vllm_engine.py`, prevent duplicated code
+        distributed_executor_backend = kwargs.pop("distributed_executor_backend", None)
+        noset_visible_devices = kwargs.pop("noset_visible_devices", None)
+        if distributed_executor_backend == "ray":
+            print(f"CHARLIE 1")
+            # a hack to make the script work.
+            # stop ray from manipulating *_VISIBLE_DEVICES
+            # at the top-level when the distributed_executor_backend is ray.
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+            os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        elif noset_visible_devices:
+            print(f"CHARLIE 2")
+            # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
+            # when the distributed_executor_backend is not rayargs and
+            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
+
         
         # Create the SGLang engine (signal handler issue is now fixed by patching)
-        print("Creating SGLang engine with patched signal handler...")
-        # self.engine = Engine(server_args=server_args)
-        self.engine = Engine(**server_args_dict)
+        print(f"Instantiating SGLang engine with kwargs: {kwargs}")
+        self.engine = Engine(**kwargs)
         print("SGLang engine created successfully")
-
-    def _convert_kwargs_to_server_args(self, args, kwargs) -> Dict[str, Any]:
-        """Convert vLLM-style kwargs to SGLang ServerArgs format."""
-        server_args = {}
-        
-        # Map common parameters
-        if "model" in kwargs:
-            server_args["model_path"] = kwargs["model"]
-        elif len(args) > 0:
-            server_args["model_path"] = args[0]
-            
-        if "tensor_parallel_size" in kwargs:
-            server_args["tp_size"] = kwargs["tensor_parallel_size"]
-        if "dtype" in kwargs:
-            server_args["dtype"] = kwargs["dtype"]
-        if "trust_remote_code" in kwargs:
-            server_args["trust_remote_code"] = kwargs["trust_remote_code"]
-        if "max_model_len" in kwargs:
-            server_args["context_length"] = kwargs["max_model_len"]
-        if "seed" in kwargs:
-            server_args["random_seed"] = kwargs["seed"]
-            
-        # SGLang specific defaults
-        server_args["log_level"] = "error"  # Keep quiet by default
-        server_args["disable_cuda_graph"] = True  # Disable CUDA graph to avoid JIT compilation issues
-        
-        return server_args
 
     def tp_size(self):
         """Return the tensor parallel size."""
@@ -338,5 +323,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         return await self.engine.tokenizer_manager.flush_cache()
 
 
-# Create Ray actor for SGLang engine. Note there is no Sync/Async distinction for SGLang.
-SGLangRayActor = ray.remote(SGLangInferenceEngine)
+# SGLangRayActor is defined in `sglang_lazy_actor.py` to avoid importing sglang
+# in the main ray process (which does not have GPU). SGLang at import time requires
+# GPU.

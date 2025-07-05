@@ -75,12 +75,19 @@ def create_ray_wrapped_inference_engines(
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
 
+    noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
+    print(f"CHARLIE noset_visible_devices: {noset_visible_devices}")
+    import torch, os
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    print(f"CUDA_VISIBLE_DEVICES: {cuda_visible_devices}")
+
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
         assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
     elif backend == "sglang":
-        from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+        from skyrl_train.inference_engines.sglang.sglang_lazy_actor import SGLangRayActor
     else:
         raise ValueError(f"Unsupported backend: {backend}")
     inference_engine_actors = []
@@ -157,15 +164,25 @@ def create_ray_wrapped_inference_engines(
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
             ).remote(
-                model=pretrain,
-                tensor_parallel_size=tensor_parallel_size,
-                seed=seed + i,
-                max_model_len=max_model_len,
+                model_path=pretrain,
+                tp_size=tensor_parallel_size,
+                mem_fraction_static=gpu_memory_utilization,
+                random_seed=seed + i,
+                context_length=max_model_len,
+                disable_radix_cache=not enable_prefix_caching,
                 dtype=model_dtype,
                 trust_remote_code=True,
+                max_prefill_tokens=max_num_batched_tokens,
+                max_running_requests=max_num_seqs,
+                # Copied from veRL's SGLang rollout
+                mm_attention_backend="fa3",
+                attention_backend="fa3",
+                enable_memory_saver=inference_engine_enable_sleep,
+                # Will be popped before instantiating sgl.Engine
+                distributed_executor_backend=distributed_executor_backend,
+                noset_visible_devices=noset_visible_devices,
                 bundle_indices=bundle_indices,
                 num_gpus=0.2 if use_hybrid_engine else 1,
-                noset_visible_devices=noset_visible_devices,
                 sampling_params=sampling_params,
                 tokenizer=tokenizer,
             )

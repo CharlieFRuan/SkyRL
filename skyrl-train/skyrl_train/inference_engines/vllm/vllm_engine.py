@@ -276,6 +276,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         # TODO (erictang000): potentially enable log requests for a debugging mode
         engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
+        print(f"CHARLIE engine_args kwargs: {kwargs}")
         return vllm.AsyncLLMEngine.from_engine_args(engine_args)
 
     async def _collect_outputs(self, prompt_token_ids, request_id: str, sampling_params: SamplingParams):
