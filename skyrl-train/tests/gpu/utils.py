@@ -248,7 +248,7 @@ def get_test_prompts(model: str, num_samples: int = 20) -> List[ConversationType
         tokenizer.pad_token = tokenizer.eos_token
 
     dataset = PromptDataset(
-        ["./data/gsm8k/test.parquet"],
+        ["./data/gsm8k/validation.parquet"],
         tokenizer,
         max_prompt_length=512,
     )
@@ -267,7 +267,7 @@ def get_test_generator_input(
     num_prompts: int = 20,
     n_samples_per_prompt: int = 1,
     max_prompt_length: int = 512,
-    data_path: str = "./data/gsm8k/test.parquet",
+    data_path: str = "./data/gsm8k/validation.parquet",
     env_class: str = "gsm8k",
 ):
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)

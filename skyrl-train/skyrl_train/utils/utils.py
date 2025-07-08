@@ -133,8 +133,6 @@ def validate_cfg(cfg: DictConfig):
         assert (
             cfg.generator.batched
         ), "if we are using the offline engine, we need to put generator in batched mode for faster generation"
-    if cfg.generator.backend == "sglang" and cfg.generator.run_engines_locally:
-        raise ValueError("SGLang backend currently does not support local engines")
 
     assert (
         cfg.trainer.sequence_parallel_backend == "ulysses"
@@ -191,6 +189,13 @@ def validate_cfg(cfg: DictConfig):
         "regular",
         "dual_clip",
     ), f"invalid loss type: {cfg.trainer.algorithm.ppo_loss_type}. Must be one of `['regular', 'dual_clip']`"
+
+    # Validate weight sync backend compatibility with generator backend
+    if cfg.generator.backend == "sglang":
+        assert cfg.generator.weight_sync_backend != "nccl", (
+            "As of now, NCCL weight sync backend is not supported with SGLang generator backend. "
+            "Please use 'gloo' as the weight sync backend instead."
+        )
 
     if cfg.trainer.strategy == "deepspeed" and not (
         cfg.trainer.policy.optimizer_config.offload_after_step
