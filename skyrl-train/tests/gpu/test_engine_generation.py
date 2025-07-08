@@ -131,13 +131,15 @@ def init_ray_sglang_engines():
         max_num_batched_tokens=8192,
         max_num_seqs=1024,
         sampling_params=get_sampling_params_for_backend(
-            "sglang", DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0})
+            "sglang",
+            DictConfig({"temperature": 0.0, "top_p": 1, "top_k": -1, "max_generate_length": 1024, "min_p": 0.0}),
         ),
         tokenizer=AutoTokenizer.from_pretrained(model),
         backend="sglang",
     )
     client = InferenceEngineClient(engine)
     return client
+
 
 async def run_batch_generation(client, prompts):
     engine_input = InferenceEngineInput(prompts=prompts)
@@ -186,6 +188,7 @@ async def run_single_generation_with_tokens(client, prompt_token_ids):
 
     return responses, finish_reasons
 
+
 def test_inference_engines_generation_sglang():
     initialize_ray(DictConfig({"generator": {"backend": "sglang"}}))
 
@@ -218,6 +221,7 @@ def test_inference_engines_generation_sglang():
             )
 
     ray.shutdown()
+
 
 # TODO(tgriggs): Replicate for sglang
 def test_inference_engines_generation():

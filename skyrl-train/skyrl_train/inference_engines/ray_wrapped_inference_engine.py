@@ -25,6 +25,9 @@ class RayWrappedInferenceEngine(InferenceEngineInterface):
         return ray.get(self.inference_engine_actor.tp_size.remote())
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
+        # NOTE(Charlie): need to specify keyword `input_batch=input_batch` to avoid Ray's error on
+        # `TypeError: too many positional arguments` since we instantiate SGLang engine in a
+        # remote function.
         return await self.inference_engine_actor.generate.remote(input_batch=input_batch)
 
     async def wake_up(self, *args: Any, **kwargs: Any):
@@ -75,12 +78,10 @@ def create_ray_wrapped_inference_engines(
     """
     from skyrl_train.utils import ray_noset_visible_devices, get_all_env_variables, get_ray_pg_ready_with_timeout
 
-    noset_visible_devices = ray_noset_visible_devices(ray.get(get_all_env_variables.remote()))
-    print(f"CHARLIE noset_visible_devices: {noset_visible_devices}")
-
     if backend == "vllm":
         import vllm
         from skyrl_train.inference_engines.vllm.vllm_engine import VLLMRayActor, AsyncVLLMRayActor
+
         assert vllm.__version__ >= "0.8.3", "SkyTrainer only supports vLLM >= 0.8.3"
     elif backend == "sglang":
         # We import SGLang later to avoid importing vllm. See `get_sglang_engine` for more.
@@ -116,8 +117,6 @@ def create_ray_wrapped_inference_engines(
             placement_group_bundle_index=i * tensor_parallel_size,
         )
 
-        print(f"num_gpus: {num_gpus}")
-
         if backend == "vllm":
             if async_engine:
                 actor_class = AsyncVLLMRayActor
@@ -151,19 +150,20 @@ def create_ray_wrapped_inference_engines(
                 tokenizer=tokenizer,
             )
         elif backend == "sglang":
-            # TODO(Charlie): SGLang doesn't support async engine yet
-            if async_engine:
-                print("Warning: SGLang doesn't support async engine, using sync engine")
+            # NOTE: there is no async / sync engine distinction in SGLang
 
             # NOTE(Charlie): We need `torch.cuda.is_available()` to be True to import SGLang. Otherwise, it requires
             # importing vllm. See https://github.com/sgl-project/sglang/blob/v0.4.8.post1/python/sglang/srt/layers/quantization/utils.py#L11-L17
             # Similar comment: https://github.com/volcengine/verl/blob/9cc307767b0c787e8f5ef581dac929f7bde044ef/verl/workers/fsdp_workers.py#L520-L527
             @ray.remote
             def get_sglang_engine():
+                # A workaround to avoid importing vllm is to give this task a GPU.
                 import os
+
                 before_cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "")
                 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
                 from skyrl_train.inference_engines.sglang.sglang_engine import SGLangRayActor
+
                 os.environ["CUDA_VISIBLE_DEVICES"] = before_cuda_visible_devices
 
                 actor_class = SGLangRayActor
@@ -182,7 +182,7 @@ def create_ray_wrapped_inference_engines(
                     trust_remote_code=True,
                     max_prefill_tokens=max_num_batched_tokens,
                     max_running_requests=max_num_seqs,
-                    # Copied from veRL's SGLang rollout
+                    # Borrowed from veRL's SGLang rollout
                     mm_attention_backend="fa3",
                     attention_backend="fa3",
                     enable_memory_saver=inference_engine_enable_sleep,
@@ -195,8 +195,8 @@ def create_ray_wrapped_inference_engines(
                     tokenizer=tokenizer,
                 )
                 return engine
+
             engine = ray.get(get_sglang_engine.remote())
-            
 
         inference_engine_actors.append(engine)
 

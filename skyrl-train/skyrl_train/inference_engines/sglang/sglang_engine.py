@@ -1,13 +1,9 @@
 import os
-import asyncio
-import warnings
-from typing import List, Any, Optional, Union, Dict
-import torch
+from typing import List, Optional
 import ray
-from uuid import uuid4
-import threading
 import multiprocessing as mp
 
+import sglang.srt.entrypoints.engine
 from sglang.srt.entrypoints.engine import Engine
 from sglang.srt.utils import (
     assert_pkg_version,
@@ -38,7 +34,7 @@ def _patched_set_envs_and_config(server_args):
     # Set global environments
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = str(int(getattr(server_args, 'enable_nccl_nvls', False)))
+    os.environ["NCCL_NVLS_ENABLE"] = str(int(getattr(server_args, "enable_nccl_nvls", False)))
     os.environ["TORCH_NCCL_AVOID_RECORD_STREAMS"] = "1"
     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "4"
     os.environ["CUDA_MODULE_LOADING"] = "AUTO"
@@ -71,27 +67,27 @@ def _patched_set_envs_and_config(server_args):
 
     # Set mp start method
     mp.set_start_method("spawn", force=True)
-    
+
     # We do NOT register signal handlers here to avoid Ray actor issues
     # Original SGLang code had: signal.signal(signal.SIGCHLD, sigchld_handler)
     # But this fails in Ray actors since signal handlers only work in main thread
 
 
 # Apply the patch
-import sglang.srt.entrypoints.engine
 sglang.srt.entrypoints.engine._set_envs_and_config = _patched_set_envs_and_config
 
 
-# TODO(charlie): duplicate of setup_envvars_for_vllm
+# TODO(charlie): duplicate of setup_envvars_for_vllm, is it needed?
 def setup_envvars_for_sglang(kwargs, bundle_indices):
-    noset_visible_devices = kwargs.pop("noset_visible_devices")
-    if kwargs.get("distributed_executor_backend") == "ray":
+    distributed_executor_backend = kwargs.pop("distributed_executor_backend", None)
+    noset_visible_devices = kwargs.pop("noset_visible_devices", None)
+    if distributed_executor_backend == "ray":
         # a hack to make the script work.
         # stop ray from manipulating *_VISIBLE_DEVICES
         # at the top-level when the distributed_executor_backend is ray.
-        # os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-        # os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-        # os.environ.pop("HIP_VISIBLE_DEVICES", None)
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+        os.environ.pop("HIP_VISIBLE_DEVICES", None)
         pass
     elif noset_visible_devices:
         # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
@@ -105,45 +101,26 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     def __init__(self, *args, bundle_indices: Optional[List[int]] = None, **kwargs):
         setup_envvars_for_sglang(kwargs, bundle_indices)
-        
-        # default to use dummy load format, which need to reload weights in first time
-        self._need_reload = True
 
         # Store common attributes
         self._tp_size = kwargs.get("tp_size", 1)
+        if self._tp_size > 1:
+            raise ValueError(
+                "As of now, we don't support tensor parallel inference engine with SGLang. "
+                "Please set `inference_engine_tensor_parallel_size` to 1."
+            )
         self.tokenizer = kwargs.pop("tokenizer", None)
-        
+
         # Extract sampling params
         sampling_params_dict = kwargs.pop("sampling_params", None)
         self.sampling_params = sampling_params_dict or {}
 
         # Unused kwargs
-        num_gpus = kwargs.pop("num_gpus", 1)
-        bundle_indices = kwargs.pop("bundle_indices", None)
+        _ = kwargs.pop("num_gpus", 1)
 
-        # TODO(Charlie): From `vllm_engine.py`, prevent duplicated code
-        distributed_executor_backend = kwargs.pop("distributed_executor_backend", None)
-        noset_visible_devices = kwargs.pop("noset_visible_devices", None)
-        if distributed_executor_backend == "ray":
-            print(f"CHARLIE 1")
-            # a hack to make the script work.
-            # stop ray from manipulating *_VISIBLE_DEVICES
-            # at the top-level when the distributed_executor_backend is ray.
-            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
-            os.environ.pop("ROCR_VISIBLE_DEVICES", None)
-            os.environ.pop("HIP_VISIBLE_DEVICES", None)
-        elif noset_visible_devices:
-            print(f"CHARLIE 2")
-            # We need to set CUDA_VISIBLE_DEVICES to the ray assigned GPU
-            # when the distributed_executor_backend is not rayargs and
-            # RAY_EXPERIMENTAL_NOSET_*_VISIBLE_DEVICES is set.
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(ray.get_gpu_ids()[0])
-
-        
         # Create the SGLang engine (signal handler issue is now fixed by patching)
-        print(f"Instantiating SGLang engine with kwargs: {kwargs}")
         self.engine = Engine(**kwargs)
-        print("SGLang engine created successfully")
+        print(f"Created SGLang engine with kwargs: {kwargs}")
 
     def tp_size(self):
         """Return the tensor parallel size."""
@@ -161,49 +138,28 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Use request sampling params if provided, otherwise use defaults
         sampling_params = request_sampling_params if request_sampling_params is not None else self.sampling_params
 
-        # Handle prompts vs token_ids
-        if prompts is not None:
-            # Convert chat format to text if needed
-            if isinstance(prompts[0], list):  # List of conversation messages
-                text_prompts = []
-                for prompt in prompts:
-                    if self.tokenizer:
-                        text_prompt = self.tokenizer.apply_chat_template(
-                            prompt,
-                            add_generation_prompt=True,
-                            tokenize=False
-                        )
-                        text_prompts.append(text_prompt)
-                    else:
-                        # Fallback: just concatenate messages
-                        text_prompt = " ".join([msg.get("content", "") for msg in prompt])
-                        text_prompts.append(text_prompt)
-                return text_prompts, None, sampling_params
-            else:
-                return prompts, None, sampling_params
-        else:
-            return None, prompt_token_ids, sampling_params
+        if prompt_token_ids is None:
+            prompt_token_ids = self.tokenizer.apply_chat_template(
+                prompts,
+                add_generation_prompt=True,
+                add_special_tokens=False,
+                return_dict=True,
+                tokenize=True,
+            )["input_ids"]
+
+        return prompt_token_ids, sampling_params
 
     def _postprocess_outputs(self, outputs):
         """Process SGLang outputs to match expected format."""
         responses: List[str] = []
         stop_reasons: List[str] = []
-        
-        # Handle both single output and batch outputs
+
         if not isinstance(outputs, list):
             outputs = [outputs]
-            
+
         for output in outputs:
-            if isinstance(output, dict):
-                # SGLang returns dict with 'text' field
-                responses.append(output.get("text", ""))
-                # Map SGLang finish reasons to our expected format
-                finish_reason = output.get("finish_reason", "stop")
-                stop_reasons.append(finish_reason)
-            else:
-                # Fallback for unexpected format
-                responses.append(str(output))
-                stop_reasons.append("stop")
+            responses.append(output["text"])
+            stop_reasons.append(output["meta_info"]["finish_reason"]["type"])
 
         return InferenceEngineOutput(
             responses=responses,
@@ -212,22 +168,13 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
         """Generate responses using SGLang engine."""
-        text_prompts, token_ids_prompts, sampling_params = self._preprocess_prompts(input_batch)
-        
+        token_ids_prompts, sampling_params = self._preprocess_prompts(input_batch)
+
         # Generate using SGLang's async method
         # Otherwise using `await asyncio.to_thread(self.engine.generate)` will cause issues
         # as SGLang's `generate()` method calls `loop = asyncio.get_event_loop()`, raising error
         # `RuntimeError: There is no current event loop in thread 'ThreadPoolExecutor-0_0'.`
-        if text_prompts is not None:
-            outputs = await self.engine.async_generate(
-                prompt=text_prompts,
-                sampling_params=sampling_params
-            )
-        else:
-            outputs = await self.engine.async_generate(
-                input_ids=token_ids_prompts,
-                sampling_params=sampling_params
-            )
+        outputs = await self.engine.async_generate(input_ids=token_ids_prompts, sampling_params=sampling_params)
 
         return self._postprocess_outputs(outputs)
 
@@ -241,9 +188,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             rank_offset=rank_offset,
             world_size=world_size,
             group_name=group_name,
-            backend=backend
+            backend=backend,
         )
-        
+
         # NOTE(charlie): Call the async method on tokenizer_manager directly to avoid event loop
         # conflicts since `sgl.Engine.init_weights_update_group` is sync, yet uses
         # `asyncio.get_event_loop()` which prevents us from using `asyncio.to_thread`. We cannot
@@ -257,14 +204,9 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Update named weights in SGLang engine."""
         if request.get("extras") and "ipc_handles" in request["extras"]:
             raise ValueError(
-                "SGLang local engines do not support CUDA IPC weight updates yet. " +
-                "Only vLLM does at the moment."
+                "SGLang local engines do not support CUDA IPC weight updates yet. " + "Only vLLM does at the moment."
             )
-        obj = UpdateWeightsFromDistributedReqInput(
-            name=request["name"],
-            dtype=request["dtype"],
-            shape=request["shape"]
-        )
+        obj = UpdateWeightsFromDistributedReqInput(name=request["name"], dtype=request["dtype"], shape=request["shape"])
 
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         success, message = await self.engine.tokenizer_manager.update_weights_from_distributed(obj, None)
@@ -272,21 +214,12 @@ class SGLangInferenceEngine(InferenceEngineInterface):
 
     async def wake_up(self, tags: Optional[List[str]] = None):
         """Wake up the engine. For multi-stage waking up, pass in `"weight"` or `"kv_cache"` to tags."""
-        # # because __init__ is a sync method, it can not call the async release_memory_occupation
-        # # have to move release_memory_occupation from __init__ to here
-        # # For multi-stage awake, we run release weight and kv_cache when we resume weights for the first time.
-        # if self._need_reload:
-        #     await self.sleep()
-        #     self._need_reload = False
-
         if tags is None:
             obj = ResumeMemoryOccupationReqInput()
         else:
             obj = ResumeMemoryOccupationReqInput(tags=tags)
-        print("CHARLIE SGLANG ENGINE WAKE UP WITH TAGS: ", tags, flush=True)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         await self.engine.tokenizer_manager.resume_memory_occupation(obj, None)
-        print("CHARLIE SGLANG ENGINE WAKE UP COMPLETED", flush=True)
 
     async def sleep(self, tags: Optional[List[str]] = None):
         """Put engine to sleep."""
@@ -295,10 +228,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         else:
             obj = ReleaseMemoryOccupationReqInput(tags=tags)
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
-        print("CHARLIE SGLANG ENGINE SLEEP WITH TAGS: ", tags, flush=True)
         await self.engine.tokenizer_manager.release_memory_occupation(obj, None)
-        print("CHARLIE SGLANG ENGINE SLEEP COMPLETED", flush=True)
-
 
     async def teardown(self):
         """Shutdown the SGLang engine."""
@@ -308,5 +238,6 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         """Reset prefix cache in SGLang engine."""
         # Call the underlying async method for the same reason as in `init_weight_update_communicator`
         return await self.engine.tokenizer_manager.flush_cache()
+
 
 SGLangRayActor = ray.remote(SGLangInferenceEngine)

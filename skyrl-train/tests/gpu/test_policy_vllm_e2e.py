@@ -132,6 +132,7 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
     """
     if backend == "sglang":
         import sglang
+
         print(f"sglang.__file__: {sglang.__file__}")
     try:
         cfg = get_test_actor_config()
@@ -166,7 +167,6 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
 
         # print GPU memory usage here
         print(f"Free GPU memory AFTER WAKE UP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
-        
 
         policy = init_worker_with_type(
             "policy",
@@ -180,8 +180,6 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
         ray.get(policy.async_run_ray_method("pass_through", "broadcast_to_inference_engines", client))
         outputs = asyncio.run(run_inference(client, get_test_prompts(model)))
 
-
-
-        # print(f"Example output: {outputs['responses'][0]}")
+        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
     finally:
         ray.shutdown()
