@@ -185,7 +185,7 @@ class FSDPPolicyRayActorBase(PolicyWorkerBase):
 
         if cache_reset_task is not None:
             await cache_reset_task
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
         torch.distributed.barrier()
 
     def get_weight_statistics(self):

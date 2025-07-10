@@ -12,11 +12,8 @@ DATA_DIR="$HOME/data/gsm8k"
 NUM_GPUS=4
 LOGGER="wandb"  # change to "console" to print to stdout
 
-BACKEND="vllm"
-WEIGHT_SYNC_BACKEND="nccl"
-
-# BACKEND="sglang"
-# WEIGHT_SYNC_BACKEND="gloo"  # Currently NCCL is not supported with SGLang.
+# BACKEND="vllm"
+BACKEND="sglang"
 
 uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   data.train_data="['$DATA_DIR/train.parquet']" \
@@ -45,7 +42,7 @@ uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_kl_loss=true \
   generator.backend=$BACKEND \
   generator.run_engines_locally=true \
-  generator.weight_sync_backend=$WEIGHT_SYNC_BACKEND \
+  generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=true \
   environment.env_class=gsm8k \
@@ -53,7 +50,7 @@ uv run --isolated --extra $BACKEND -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.run_name="charlie_0709_sglang" \
   trainer.resume_mode=null \
   trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
   $@

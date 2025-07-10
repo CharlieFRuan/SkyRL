@@ -110,6 +110,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         (True, "nccl", "fsdp2", "sglang"),
         (True, "gloo", "fsdp2", "sglang"),
         (True, "gloo", "fsdp2", "vllm"),
+        (False, "gloo", "fsdp2", "sglang"),
     ],
     ids=[
         "no_colocate_nccl_fsdp_vllm",
@@ -124,6 +125,7 @@ def init_inference_engines(cfg, v1, use_local, async_engine, tp_size, colocate_a
         "colocate_nccl_fsdp2_sglang",
         "colocate_gloo_fsdp2_sglang",
         "colocate_gloo_fsdp2_vllm",
+        "no_colocate_gloo_fsdp2_sglang",
     ],
 )
 def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
@@ -152,21 +154,26 @@ def test_policy_vllm_e2e(colocate_all, weight_sync_backend, strategy, backend):
             backend=backend,
         )
 
-        # print GPU memory usage here
-        print(f"Free GPU memory BEFORE SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+        outputs = asyncio.run(run_inference(client, get_test_prompts(model, num_samples=3)))
 
-        # sleep here to test
-        asyncio.run(client.sleep())
+        print(f"Example output: {outputs['responses'][0]}, {outputs['stop_reasons'][0]}")
 
         # print GPU memory usage here
-        print(f"Free GPU memory AFTER SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+        # print(f"Free GPU memory BEFORE SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
 
-        # wake up here to test
-        if colocate_all:
-            asyncio.run(client.wake_up())
+        # # sleep here to test
+        # asyncio.run(client.sleep())
+        # # torch.cuda.empty_cache()
 
-        # print GPU memory usage here
-        print(f"Free GPU memory AFTER WAKE UP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+        # # print GPU memory usage here
+        # print(f"Free GPU memory AFTER SLEEP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
+
+        # # wake up here to test
+        # if colocate_all:
+        #     asyncio.run(client.wake_up())
+
+        # # print GPU memory usage here
+        # print(f"Free GPU memory AFTER WAKE UP: {torch.cuda.mem_get_info()[0] / 1024**2:.1f} MB")
 
         policy = init_worker_with_type(
             "policy",
