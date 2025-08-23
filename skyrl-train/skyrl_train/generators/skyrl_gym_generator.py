@@ -192,6 +192,9 @@ class SkyRLGymGenerator(GeneratorInterface):
                     chat_history, chat_end_index, output, new_obs
                 )
             elif self.use_conversation_multi_turn:
+                # Since we use `</search>` and `</answer>` as stop strings, we need to add the eos token to the output ids
+                if (output.endswith("</search>") or output.endswith("</answer>")):
+                    output_ids.append(self.tokenizer.eos_token_id)
                 # b. Token-in-token-out. Follow multi-turn chat history format.
                 input_ids, loss_mask = self._get_next_input_ids_with_multiturn_chat_template(
                     input_ids, loss_mask, output_ids, new_obs, done

@@ -57,10 +57,11 @@ class SearchEnv(BaseTextEnv):
         return "<answer>" in action and "</answer>" in action
 
     def _postprocess_action(self, action: str) -> str:
+        """Check that the generation stops at the correct place."""
         if "</search>" in action:
-            return action.split("</search>")[0] + "</search>"
+            assert action.split("</search>")[1] == ""
         elif "</answer>" in action:
-            return action.split("</answer>")[0] + "</answer>"
+            assert action.split("</answer>")[1] == ""
         else:
             return action
 
@@ -71,7 +72,7 @@ class SearchEnv(BaseTextEnv):
 
     def step(self, action: str) -> BaseTextEnvStepOutput:
         self.turns += 1
-        action = self._postprocess_action(action)
+        _ = self._postprocess_action(action)
         self.chat_history.append({"role": "assistant", "content": action})
 
         error = None
@@ -79,9 +80,7 @@ class SearchEnv(BaseTextEnv):
         reward = self._get_reward(action, done)
 
         if done:
-            return BaseTextEnvStepOutput(
-                observations=[], reward=reward, done=done, metadata={}, postprocessed_action=action
-            )
+            return BaseTextEnvStepOutput(observations=[], reward=reward, done=done, metadata={})
 
         try:
             query = self._parse_action(action)
@@ -114,5 +113,4 @@ class SearchEnv(BaseTextEnv):
             reward=reward,
             done=done,
             metadata=info,
-            postprocessed_action=action,
         )

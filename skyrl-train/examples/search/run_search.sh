@@ -7,7 +7,7 @@ set -x
 # bash examples/search/run_search.sh
 
 # path for dataset (.parquet files) containing the prompts and metadata for each question
-DATA_DIR="$HOME/data/searchR1"
+DATA_DIR="/workspace/data/searchR1"
 
 uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   data.train_data="['${DATA_DIR}/train.parquet']" \
@@ -42,12 +42,12 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.sampling_params.max_generate_length=500 \
   generator.async_engine=true \
   generator.batched=false \
-  generator.use_conversation_multi_turn=false \
+  generator.use_conversation_multi_turn=true \
   generator.n_samples_per_prompt=5 \
   generator.max_turns=4 \
-  generator.use_conversation_multi_turn=false \
   generator.sampling_params.temperature=1.0 \
   generator.sampling_params.top_p=1.0 \
+  generator.sampling_params.stop='["</search>", "</answer>"]' \
   environment.env_class="search" \
   environment.skyrl_gym.max_env_workers=16 \
   environment.skyrl_gym.search.log_requests=false \
@@ -55,16 +55,17 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   environment.skyrl_gym.search.topk=3 \
   trainer.logger="wandb" \
   trainer.project_name="skyrl-search" \
-  trainer.run_name="skyrl-search_4turns_maxgeneratelen_500" \
-  trainer.ckpt_interval=20 \
+  trainer.run_name="charlie-0821-multiturn-TITO-skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.ckpt_interval=50 \
   trainer.hf_save_interval=100 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
-  trainer.ckpt_path="$HOME/skyrl-search_4turns_maxgeneratelen_500" \
+  trainer.ckpt_path="/workspace/skyrl-search_4turns_maxgeneratelen_500" \
   trainer.eval_batch_size=256 \
   trainer.eval_before_train=false \
   generator.eval_sampling_params.temperature=0 \
-  trainer.export_path="$HOME/skyrl-search_4turns_maxgeneratelen_500/exports" \
+  generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
+  trainer.export_path="/workspace/skyrl-search_4turns_maxgeneratelen_500/exports" \
   trainer.eval_interval=50 \
   $@
   
