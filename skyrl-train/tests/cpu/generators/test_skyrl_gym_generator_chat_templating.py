@@ -183,3 +183,59 @@ async def test_skyrl_gym_generator_chat_templating_exact(model_name):
             expected_loss_masks = expected_loss_masks[:-1]  # remove the extra 0 for \n
     assert len(expected_loss_masks) == len(generator_output["loss_masks"][0])
     assert generator_output["loss_masks"][0] == expected_loss_masks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name", ["Qwen/Qwen2.5-0.5B-Instruct", "unsloth/Llama-3.2-1B-Instruct", "Qwen/Qwen3-0.6B"]
+)
+async def test_skyrl_gym_generator_chat_templating_single_turn(model_name):
+    _register_test_env_if_needed()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    mock_llm = MagicMock()
+
+    def mock_generate(input_batch):
+        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+        text = "b" + tokenizer.eos_token
+        return {
+            "responses": [text] * num_prompts,
+            "stop_reasons": ["stop"] * num_prompts,
+            "response_logprobs": None,
+            "response_ids": [tokenizer.encode(text, add_special_tokens=False)] * num_prompts,
+        }
+
+    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+
+    generator_cfg = DictConfig(
+        {
+            "sampling_params": {"max_generate_length": 200, "logprobs": None},
+            "max_input_length": 200,
+            "batched": False,
+            "max_turns": 3,
+            "zero_reward_on_non_stop": False,
+            "apply_overlong_filtering": False,
+            "use_conversation_multi_turn": False,
+        }
+    )
+    env_cfg = DictConfig({"max_env_workers": 0, "env_class": "cpu_test_env"})
+
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=tokenizer,
+        model_name=model_name,
+    )
+
+    prompt = [[{"role": "user", "content": "a"}]]
+    extras = [{"answer": "4"}]
+    input_batch: GeneratorInput = {
+        "prompts": prompt,
+        "env_extras": extras,
+        "env_classes": [env_cfg.env_class],
+    }
+    generator_output: GeneratorOutput = await generator.generate(input_batch)
+
+    resp_str = tokenizer.decode(generator_output["response_ids"][0])
+    assert "b1b2b" in resp_str
+    assert len(generator_output["loss_masks"][0]) == len(generator_output["response_ids"][0])
