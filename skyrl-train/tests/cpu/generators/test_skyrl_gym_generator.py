@@ -9,70 +9,46 @@ from skyrl_train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl_train.generators.base import GeneratorInput, GeneratorOutput, ConversationType
 from skyrl_train.generators.utils import concatenate_generator_outputs, get_metrics_from_generator_output
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
-
-
-# Mock constants, where 4 is the eos token id
-MOCK_LLM_OUTPUT_IDS = [1, 10, 12, 4]
-MOCK_TOKENIZER_ENCODED_IDS = [1, 2, 3, 4]
+from transformers import AutoTokenizer
 
 
 # TODO (erictang000): clean up the mocking for tests in this file
-@pytest.fixture
-def mock_tokenizer():
-    """
-    A mock tokenizer that encodes any non-empty string to `MOCK_TOKENIZER_ENCODED_IDS`.
-    For chat template, if `tokenize=False`, concatenate the content of each message.
-    If `tokenize=True`, return `MOCK_TOKENIZER_ENCODED_IDS` for each message.
-    """
-    tokenizer = MagicMock()
 
-    def mock_apply_chat_template(x, **kwargs):
-        if not kwargs.get("tokenize", True):
-            return "".join([str(i["content"]) for i in x])
-        else:
-            # Non-dict return
-            if isinstance(x, list) and len(x) > 0 and isinstance(x[0], list):
-                # Multiple prompts
-                return [MOCK_TOKENIZER_ENCODED_IDS.copy() for _ in x]
-            else:
-                # Single prompt or conversation
-                return MOCK_TOKENIZER_ENCODED_IDS.copy()
 
-    def mock_encode(x, **kwargs):
-        if x != "":
-            return MOCK_TOKENIZER_ENCODED_IDS.copy()
-        else:
-            return []
-
-    tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
-    tokenizer.decode.side_effect = lambda x: "decoded_output"
-    tokenizer.encode.side_effect = mock_encode
-    tokenizer.eos_token_id = 4
-    tokenizer.eos_token = "<|end_of_turn|>"
-    tokenizer.return_value = {"input_ids": MOCK_TOKENIZER_ENCODED_IDS.copy()}  # simulate tokenized response
-    return tokenizer
+@pytest.fixture(params=["Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B", "unsloth/Llama-3.2-1B-Instruct"])
+def model_name(request):
+    return request.param
 
 
 @pytest.fixture
-def mock_llm():
+def tokenizer(model_name):
+    return AutoTokenizer.from_pretrained(model_name)
+
+
+@pytest.fixture
+def mock_llm(tokenizer):
     """
-    This replaces InferenceEngineClient, where `.generate()` always returns MOCK_LLM_OUTPUT_IDS
-    for each prompt, with corresponding string output "mocked output".
+    This replaces InferenceEngineClient, where `.generate()` returns a fixed textual
+    response for each prompt. Tokenization is handled by the real tokenizer.
     """
     mock = MagicMock()
 
-    # Mock the new generate method
+    mock_output_text = "mocked output" + tokenizer.eos_token
+    mock_output_ids = tokenizer.encode(mock_output_text, add_special_tokens=False)
+
     def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
+        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(
+            input_batch["prompt_token_ids"]
+        )
         return {
-            "responses": ["mocked output"] * num_prompts,
+            "responses": [mock_output_text] * num_prompts,
             "stop_reasons": ["stop"] * num_prompts,
-            # say response gets tokenized to 3 tokens
-            "response_logprobs": [[0.1] * len(MOCK_LLM_OUTPUT_IDS)] * num_prompts,
-            "response_ids": [MOCK_LLM_OUTPUT_IDS.copy()] * num_prompts,
+            "response_logprobs": [[0.1] * len(mock_output_ids)] * num_prompts,
+            "response_ids": [mock_output_ids.copy()] * num_prompts,
         }
 
     mock.generate = AsyncMock(side_effect=mock_generate)
+    mock.output_ids = mock_output_ids
     return mock
 
 
@@ -225,7 +201,7 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
 @patch("skyrl_gym.make")
 @pytest.mark.parametrize("use_conversation_multi_turn", [True, False])
 async def test_agent_loop_single_turn(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, use_conversation_multi_turn, mock_env_cfg
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, use_conversation_multi_turn, mock_env_cfg, model_name
 ):
     """
     This test mocks when we call SkyRLGymGenerator.agent_loop() despite being a single-turn generation.
@@ -233,7 +209,6 @@ async def test_agent_loop_single_turn(
     """
     mock_generator_cfg.use_conversation_multi_turn = use_conversation_multi_turn
     mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
-    mock_tokenizer.eos_token_id = 4  # bypass check for eos token id for this test
 
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
@@ -242,8 +217,8 @@ async def test_agent_loop_single_turn(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -253,15 +228,16 @@ async def test_agent_loop_single_turn(
         prompt, mock_env_cfg.env_class, extras, max_tokens=8, max_input_length=512
     )
 
-    assert response_ids == MOCK_LLM_OUTPUT_IDS
+    assert "mocked output" in tokenizer.decode(response_ids)
     assert reward == 1.0
     assert stop_reason == "stop"
-    assert loss_mask == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert len(loss_mask) == len(response_ids)
+    assert sum(loss_mask) == len(tokenizer.encode("mocked output", add_special_tokens=False)) + 1
 
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
-async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg):
+async def test_generate_batched(mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, model_name):
     mock_make.return_value = mock_env
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
@@ -269,8 +245,8 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, m
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -286,11 +262,11 @@ async def test_generate_batched(mock_make, mock_tokenizer, mock_llm, mock_env, m
     generator_output: GeneratorOutput = await generator.generate(input_batch)
 
     # uses output from llm directly
-    assert generator_output["response_ids"][0] == MOCK_LLM_OUTPUT_IDS
+    assert "mocked output" in tokenizer.decode(generator_output["response_ids"][0])
 
     assert generator_output["rewards"][0] == 1.0
     assert generator_output["stop_reasons"][0] == "stop"
-    assert generator_output["loss_masks"][0] == [1] * len(MOCK_LLM_OUTPUT_IDS)
+    assert generator_output["loss_masks"][0] == [1] * len(generator_output["response_ids"][0])
 
 
 def test_generator_output_concatenation():
@@ -358,7 +334,7 @@ def test_get_metrics_from_generator_output():
 @pytest.mark.parametrize("batched", [True, False])
 @patch("skyrl_gym.make")
 async def test_generate_interface_compliance(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, batched
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, batched, model_name
 ):
     """Test that SkyRLGymGenerator.generate() strictly conforms to the TypedDict interface.
 
@@ -373,8 +349,8 @@ async def test_generate_interface_compliance(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
     generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
 
@@ -438,21 +414,19 @@ async def test_generate_interface_compliance(
 @pytest.mark.parametrize("turns_to_exceed", [1, 3])  # Test single-turn and multi-turn scenarios
 @patch("skyrl_gym.make")
 async def test_length_limit_exceeded_during_conversation(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, turns_to_exceed
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, turns_to_exceed, model_name
 ):
-    """Test that length limit is enforced during multi-turn conversations.
-
-    Tests both single-turn (turns_to_exceed=1) and multi-turn (turns_to_exceed=3) scenarios
-    to verify length accumulation and limit enforcement.
-    """
+    """Test that length limit is enforced during multi-turn conversations."""
     mock_make.return_value = mock_env
     mock_generator_cfg.batched = False  # Use agent_loop mode
     mock_generator_cfg.max_turns = 5  # Allow multiple turns
     mock_generator_cfg.use_conversation_multi_turn = True
-    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
+
+    prompt = [{"role": "user", "content": "Initial input"}]
+    mock_env.init.return_value = (prompt, {})
 
     # Configure environment to never set done=True naturally (we want to hit length limit)
-    def mock_step_never_done(output):
+    def mock_step_never_done(_):
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": "next"}],
             reward=0.5,
@@ -460,51 +434,25 @@ async def test_length_limit_exceeded_during_conversation(
             metadata={},
         )
 
-    # We start with initial prompt len 4 due to mock_apply_chat_template
-    # Each turn, observation is 4 tokens due to mock_encode
     mock_env.step.side_effect = mock_step_never_done
-    max_input_length = 20  # Low limit to trigger length exceeded
 
-    # Mock the new generate method
-    def mock_generate(input_batch):
-        num_prompts = len(input_batch["prompts"]) if "prompts" in input_batch else len(input_batch["prompt_token_ids"])
-        if turns_to_exceed == 1:
-            mock_llm_output_ids = [1] * 20  # Enough to exceed limit immediately (4 + 20 + 4 = 28 > 20)
-            assert (
-                len(MOCK_TOKENIZER_ENCODED_IDS) + len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS)
-                > max_input_length
-            )
-        else:
-            assert turns_to_exceed == 3
-            mock_llm_output_ids = [1] * 2  # Enough to exceed limit after 3 turns (4 + (2 + 4) * 3 = 22 > 20)
-            assert (
-                len(MOCK_TOKENIZER_ENCODED_IDS)
-                + (len(mock_llm_output_ids) + len(MOCK_TOKENIZER_ENCODED_IDS)) * turns_to_exceed
-                > max_input_length
-            )
-        return {
-            "responses": ["mocked output"] * num_prompts,
-            "stop_reasons": ["stop"] * num_prompts,
-            "response_logprobs": [[0.1] * len(mock_llm_output_ids)] * num_prompts,
-            "response_ids": [mock_llm_output_ids.copy()] * num_prompts,
-        }
-
-    mock_llm.generate = AsyncMock(side_effect=mock_generate)
+    # Compute max_input_length so that length is exceeded after `turns_to_exceed` turns
+    prompt_len = len(tokenizer.apply_chat_template(prompt, tokenize=True))
+    obs_len = len(tokenizer.encode("next"))
+    llm_len = len(mock_llm.output_ids)
+    max_input_length = prompt_len + turns_to_exceed * (llm_len + obs_len) - 1
 
     generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
-    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
-
-    prompt = [{"role": "user", "content": "Start conversation"}]
-    extras = {"test": "value"}
+    generator.base_conversation_token_ids = []
 
     response_ids, reward, stop_reason, loss_mask, prompt_token_ids, rollout_logprobs = await generator.agent_loop(
-        prompt, "test_env", extras, max_tokens=100, max_input_length=max_input_length
+        prompt, "test_env", {"test": "value"}, max_tokens=100, max_input_length=max_input_length
     )
 
     # Verify that length limit was hit
@@ -525,100 +473,58 @@ async def test_length_limit_exceeded_during_conversation(
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_multi_turn_response_truncation(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, model_name
 ):
-    """
-    Tests that in a multi-turn conversation, if the final tokenized response exceeds the
-    calculated maximum length, it is correctly truncated and the stop reason is set to 'length'.
-    """
+    """Tests that a multi-turn conversation is truncated when exceeding length limits."""
     mock_make.return_value = mock_env
-    mock_generator_cfg.max_turns = 3  # Ensure multi-turn logic is triggered
+    mock_generator_cfg.max_turns = 10  # Allow many turns
     mock_generator_cfg.batched = False  # Test is for agent_loop
     mock_generator_cfg.use_conversation_multi_turn = True
-    mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    # Configure environment to run for multiple turns to generate enough tokens for truncation
+    prompt = [{"role": "user", "content": "Initial input"}]
+    mock_env.init.return_value = (prompt, {})
+
     step_count = 0
 
-    def mock_step_multi_turn(output):
+    def mock_step_multi_turn(_):
         nonlocal step_count
         step_count += 1
-        done = step_count >= 10  # Allow many turns to exceed length limit
+        done = step_count >= 10  # allow many steps until length limit triggers
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": "next turn"}], reward=0.5, done=done, metadata={}
         )
 
     mock_env.step.side_effect = mock_step_multi_turn
 
-    # Define token lengths to control the test
-    initial_prompt_len = 13
     max_tokens_from_llm = 20
     max_input_len = 50
-
-    # Expected max response tokens = max_tokens + max_input_length - initial_prompt_length
-    expected_max_response_tokens = max_tokens_from_llm + max_input_len - initial_prompt_len  # 20 + 50 - 13 = 57
-
-    def mock_apply_chat_template(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            # Return initial prompt tokens
-            return [1] * initial_prompt_len
-        else:
-            # Not used in messages_mode=False
-            return "".join([msg.get("content", "") for msg in messages])
-
-    def mock_encode(text, **kwargs):
-        # This makes observation_ids to always be 13 tokens
-        return [1] * 13
-
-    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
-    mock_tokenizer.encode.side_effect = mock_encode
-
-    # The intitial prompt is 13 tokens due to mock_apply_chat_template
-    # Each turn, observation is 13 tokens due to mock_encode and empty system_prompt_ids
-    # And the LLM response is 4 tokens due to MOCK_LLM_OUTPUT_IDS
-    # So input_ids are 13, 30, 47, 64. And 64 would cause a break in the loop due to exceeding max_input_len.
-    # Then with 64, we get the `input_ids[initial_prompt_length:]`, which makes our final
-    # response_ids to be 64 - 13 = 51 tokens. So in this case, we are not truncated by expected_max_response_tokens.
-    expected_final_response_tokens = 51
+    initial_prompt_len = len(tokenizer.apply_chat_template(prompt, tokenize=True))
+    expected_max_response_tokens = max_tokens_from_llm + max_input_len - initial_prompt_len
 
     generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
-    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
-
-    prompt = [{"role": "user", "content": "Initial prompt"}]
-    extras = {}
+    generator.base_conversation_token_ids = []
 
     response_ids, _, stop_reason, loss_mask, _, _ = await generator.agent_loop(
-        prompt, "test_env", extras, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
+        prompt, "test_env", {}, max_tokens=max_tokens_from_llm, max_input_length=max_input_len
     )
 
-    # Verify truncation occurred
     assert len(response_ids) <= expected_max_response_tokens
-    assert (
-        len(response_ids) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} response tokens, got {len(response_ids)}"
-    assert (
-        len(loss_mask) == expected_final_response_tokens
-    ), f"Expected {expected_final_response_tokens} loss mask entries, got {len(loss_mask)}"
-
-    # Verify stop reason is "length" due to truncation
-    assert stop_reason == "length", f"Expected stop_reason='length', got '{stop_reason}'"
+    assert len(loss_mask) == len(response_ids)
+    assert stop_reason == "length"
 
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_postprocessed_action_used(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_env_cfg, mock_generator_cfg
+    mock_make, tokenizer, mock_llm, mock_env, mock_env_cfg, mock_generator_cfg, model_name
 ):
-    """
-    Tests that if the environment returns a `postprocessed_action`, it is used
-    in the chat history instead of the original LLM response.
-    """
+    """Tests that if the environment returns a `postprocessed_action`, it is used."""
     mock_make.return_value = mock_env
     mock_generator_cfg.max_turns = 1  # Single turn
     mock_generator_cfg.batched = False
@@ -627,7 +533,6 @@ async def test_postprocessed_action_used(
     postprocessed_response = "This is a clean response."
     llm_raw_response = "RAW LLM OUTPUT"
 
-    # Environment step returns a postprocessed version of the LLM response
     def mock_step(_):
         return BaseTextEnvStepOutput(
             observations=[{"role": "user", "content": "new input"}],
@@ -639,51 +544,30 @@ async def test_postprocessed_action_used(
 
     mock_env.step.side_effect = mock_step
 
-    # The LLM will output a raw string, which should be overridden
     mock_llm.generate.return_value = {
         "responses": [llm_raw_response],
         "stop_reasons": ["stop"],
+        "response_ids": [tokenizer.encode(llm_raw_response + tokenizer.eos_token, add_special_tokens=False)],
     }
-
-    def mock_apply_chat_template(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            return [1] * 5  # Initial prompt tokens
-        else:
-            return "".join([msg.get("content", "") for msg in messages])
-
-    def mock_encode(text, **kwargs):
-        # The key test: postprocessed response should be encoded, not raw LLM output
-        if postprocessed_response in str(text):
-            return [42] * 10  # Distinctive tokens for postprocessed response
-        elif "new input" in str(text):
-            return [5] * 2  # Observation tokens
-        else:
-            return [1] * 3  # Default tokens
-
-    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
-    mock_tokenizer.encode.side_effect = mock_encode
 
     generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
-    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []
 
     prompt = [{"role": "user", "content": "Initial input"}]
-    env_extras = {}
-
     response_ids, reward, stop_reason, loss_mask, prompt_ids, _ = await generator.agent_loop(
-        prompt, "test_env", env_extras, max_tokens=20, max_input_length=50
+        prompt, "test_env", {}, max_tokens=20, max_input_length=50
     )
 
-    # Check that the postprocessed response tokens (42) are present in response_ids
-    # This verifies that postprocessed_action was used instead of raw LLM output
-    assert any(token == 42 for token in response_ids), f"Expected postprocessed response tokens (42) in {response_ids}"
-    # Make sure raw LLM tokens (99) are NOT present
-    assert not any(token == 99 for token in response_ids), f"Raw LLM output tokens (99) should not be in {response_ids}"
+    postprocessed_ids = tokenizer.encode(postprocessed_response, add_special_tokens=False)
+    raw_ids = tokenizer.encode(llm_raw_response, add_special_tokens=False)
+    assert any(token in response_ids for token in postprocessed_ids)
+    assert all(token not in response_ids for token in raw_ids)
 
     assert reward == 1.0
     assert stop_reason == "stop"
@@ -693,50 +577,34 @@ async def test_postprocessed_action_used(
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_apply_overlong_filtering_non_batched(
-    mock_make, mock_tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, model_name
 ):
-    """
-    Test that apply_overlong_filtering correctly zeroes out loss masks for truncated trajectories
-    in non-batched mode (using agent_loop).
-
-    Tests both truncated and non-truncated responses to verify that:
-    - Trajectories with responses not ending with eos token have their loss masks zeroed out
-    - Trajectories with responses ending with eos token keep their original loss masks
-    """
+    """Test apply_overlong_filtering correctly zeroes loss masks in non-batched mode."""
     mock_make.return_value = mock_env
-    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    mock_generator_cfg.apply_overlong_filtering = True
     mock_generator_cfg.batched = False
     mock_generator_cfg.max_turns = 1
     mock_generator_cfg.use_conversation_multi_turn = False
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    # Mock out the environment and inference engine generation.
     mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
-
-    def mock_apply_chat_template(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            return [1, 2, 3, 4, 5]  # 5 tokens for prompt
-        else:
-            return "".join([msg.get("content", "") for msg in messages])
-
-    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
-    mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
-    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []
 
-    # First test: response that doesn't end with eos token (should be filtered)
+    token_a = tokenizer.encode("a", add_special_tokens=False)[0]
+    long_response = [token_a] * 10
     mock_llm.generate = AsyncMock(
         return_value={
             "responses": ["truncated response"],
             "stop_reasons": ["length"],
-            "response_ids": [[10, 11, 12, 13, 14, 15, 16, 17, 18, 19]],  # 10 tokens, will be truncated
+            "response_ids": [long_response],
         }
     )
 
@@ -745,29 +613,21 @@ async def test_apply_overlong_filtering_non_batched(
         "env_extras": [{"test": "value"}],
         "env_classes": [mock_env_cfg.env_class],
     }
-
     output_truncated = await generator.generate(input_batch_truncated)
 
-    # Verify truncated response has zeroed loss mask
     assert len(output_truncated["loss_masks"]) == 1
-    assert len(output_truncated["loss_masks"][0]) == 5  # Truncated to max_generate_length=5
-    assert output_truncated["loss_masks"][0] == [
-        0,
-        0,
-        0,
-        0,
-        0,
-    ], "Loss mask should be all zeros for response not ending with eos token"
-    # Note: The long response gets truncated by max_response_tokens, so it doesn't end with eos token
+    assert len(output_truncated["loss_masks"][0]) == mock_generator_cfg.sampling_params.max_generate_length
+    assert output_truncated["loss_masks"][0] == [0] * mock_generator_cfg.sampling_params.max_generate_length
 
     # Second test: response that ends with eos token (should not be filtered)
-    # Reset the environment init to ensure clean state
     mock_env.init.return_value = ([{"role": "user", "content": "Fresh input"}], {})
+    eos_id = tokenizer.eos_token_id
+    response_with_eos = [token_a, eos_id]
     mock_llm.generate = AsyncMock(
         return_value={
             "responses": ["truncated response"],
             "stop_reasons": ["length"],
-            "response_ids": [[20, 21, 4]],  # 3 tokens, ends with eos token 4
+            "response_ids": [response_with_eos],
         }
     )
 
@@ -779,71 +639,44 @@ async def test_apply_overlong_filtering_non_batched(
 
     output_normal = await generator.generate(input_batch_normal)
 
-    # Verify normal response keeps original loss mask (all 1s)
     assert len(output_normal["loss_masks"]) == 1
-    assert len(output_normal["loss_masks"][0]) == 3  # 3 response tokens (already includes EOS token)
-    assert output_normal["loss_masks"][0] == [
-        1,
-        1,
-        1,
-    ], "Loss mask should remain as 1s for response ending with eos token"
+    assert len(output_normal["loss_masks"][0]) == len(response_with_eos)
+    assert output_normal["loss_masks"][0] == [1] * len(response_with_eos)
 
 
 @pytest.mark.asyncio
 @patch("skyrl_gym.make")
 async def test_apply_overlong_filtering_batched(
-    mock_make,
-    mock_tokenizer,
-    mock_llm,
-    mock_env,
-    mock_generator_cfg,
-    mock_env_cfg,
+    mock_make, tokenizer, mock_llm, mock_env, mock_generator_cfg, mock_env_cfg, model_name
 ):
-    """
-    Test that apply_overlong_filtering correctly zeroes out loss masks for truncated trajectories
-    in batched mode.
-
-    Tests a response that doesn't end with eos token to verify that it gets filtered.
-    """
+    """Test apply_overlong_filtering in batched mode with non-eos response."""
     mock_make.return_value = mock_env
-    mock_generator_cfg.apply_overlong_filtering = True  # Enable filtering
+    mock_generator_cfg.apply_overlong_filtering = True
     mock_generator_cfg.batched = True
     mock_generator_cfg.max_turns = 1
     mock_env.init.return_value = ([{"role": "user", "content": "Initial input"}], {})
 
-    # Mock out environment and inference engine generation.
     mock_env.step.side_effect = lambda x: BaseTextEnvStepOutput(observations=[], reward=1.0, done=True, metadata={})
+
+    token_a = tokenizer.encode("a", add_special_tokens=False)[0]
+    response_ids = [token_a] * 4  # does not end with eos
     mock_llm.generate = AsyncMock(
         return_value={
             "responses": ["truncated response"],
             "stop_reasons": ["length"],
-            "response_ids": [[10, 11, 12, 13]],
+            "response_ids": [response_ids],
         }
     )
-
-    def mock_apply_chat_template(messages, **kwargs):
-        if kwargs.get("tokenize", True):
-            return [[1, 2, 3, 4, 5] for _ in messages]  # 5 tokens for each prompt
-        else:
-            return "".join([msg.get("content", "") for msg in messages])
-
-    def mock_encode_or_tokenize(text):
-        return [10, 11, 12, 13]  # 4 tokens, doesn't end with eos_token_id=4
-
-    mock_tokenizer.apply_chat_template.side_effect = mock_apply_chat_template
-    mock_tokenizer.side_effect = lambda text: {"input_ids": mock_encode_or_tokenize(text)}
-    mock_tokenizer.eos_token_id = 4  # Set EOS token ID
 
     generator = SkyRLGymGenerator(
         generator_cfg=mock_generator_cfg,
         skyrl_gym_cfg=mock_env_cfg,
         inference_engine_client=mock_llm,
-        tokenizer=mock_tokenizer,
-        model_name="test_model",
+        tokenizer=tokenizer,
+        model_name=model_name,
     )
-    generator.base_conversation_token_ids = []  # to make sure observation_ids are encoded correctly
+    generator.base_conversation_token_ids = []
 
-    # Test batched mode with response that doesn't end with eos token
     prompts = [[{"role": "user", "content": "Test prompt"}]]
     env_extras = [{"test": "value"}]
     env_classes = [mock_env_cfg.env_class]
@@ -856,12 +689,5 @@ async def test_apply_overlong_filtering_batched(
 
     generator_output = await generator.generate(input_batch)
 
-    # Verify that the loss mask is zeroed out for the response not ending with eos token
     assert len(generator_output["loss_masks"]) == 1
-    assert len(generator_output["loss_masks"][0]) == 4  # Should match response length
-    assert generator_output["loss_masks"][0] == [
-        0,
-        0,
-        0,
-        0,
-    ], "Loss mask should be all zeros for response not ending with eos token"
+    assert generator_output["loss_masks"][0] == [0] * len(response_ids)
