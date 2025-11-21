@@ -85,10 +85,13 @@ class TerminalBenchGenerator(GeneratorInterface):
                 successful_outputs.append(output)
 
         # Calculate rollout metrics for successful outputs
-        rollout_metrics = get_rollout_metrics(
-            [output.response_ids for output in successful_outputs], 
-            [output.reward for output in successful_outputs],
-        )
+        if len(successful_outputs) > 0:
+            rollout_metrics = get_rollout_metrics(
+                [output.response_ids for output in successful_outputs], 
+                [output.reward for output in successful_outputs],
+            )
+        else:
+            rollout_metrics = {}
         rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
         rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
 
