@@ -9,7 +9,7 @@ TRAIN_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--Ope
 # Got after hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
 EVAL_DATA="['/home/ec2-user/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-TB-dev/snapshots/c1df0436e2d58c89f67d552c36cab9172280c5ae']"
 
-CHAT_TEMPLATE_PATH="/home/ec2-user/dcagent-workspace/SkyRL/skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2"
+CHAT_TEMPLATE_PATH="/home/ec2-user/SkyRL/skyrl-train/examples/terminal_bench/qwen3_thinking_acc.jinja2"
 TRIALS_DIR="/home/ec2-user/trials_run"
 CKPTS_DIR="/home/ec2-user/otagent/ckpts"
 EXPORTS_DIR="/home/ec2-user/otagent/exports"
