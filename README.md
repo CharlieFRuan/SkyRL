@@ -23,9 +23,9 @@
 
 This is a fork of SkyRL for the [OpenThoughts-Agent project](https://github.com/open-thoughts/OpenThoughts-Agent).
 
-We will soon merge the changes to main SkyRL branch.
+We will soon merge the changes to the main SkyRL branch.
 
-For the time being, we list the steps to run SkyRL+Harbor for re-producing the RL training of our first release, i.e.:
+For the time being, we list the steps to run SkyRL+Harbor for reproducing the RL training of our first release, i.e.:
 - Using [open-thoughts/OpenThinker-Agent-v1-SFT](https://huggingface.co/open-thoughts/OpenThinker-Agent-v1-SFT) as base
 - GRPO with the data [open-thoughts/OpenThoughts-Agent-v1-RL](https://huggingface.co/datasets/open-thoughts/OpenThoughts-Agent-v1-RL), while
 - Evaluating with [open-thoughts/OpenThoughts-TB-dev](https://huggingface.co/datasets/open-thoughts/OpenThoughts-TB-dev), and 
@@ -63,9 +63,7 @@ pip install fastapi uvicorn
 
 We will soon make things uv-syncable.
 
-### Data prepartion
-
-Under the `SkyRL` folder,
+### Data preparation
 
 ```bash
 conda activate otagent
@@ -74,6 +72,7 @@ hf download open-thoughts/OpenThoughts-TB-dev --repo-type=dataset
 # Download the train dataset
 hf download open-thoughts/OpenThoughts-Agent-v1-RL --repo-type=dataset
 # cd into the downloaded folder, say /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
+cd /path/to/.cache/huggingface/hub/datasets--open-thoughts--OpenThoughts-Agent-v1-RL/snapshots/hash_code
 python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
 ```
 
@@ -82,6 +81,7 @@ python extract_parquet_tasks.py tasks_new.parquet ./extracted_tasks
 Then configure the paths and API keys at the top of the script, and run:
 
 ```bash
+cd SkyRL/skyrl-train
 bash run_otagent.sh
 ```
 
