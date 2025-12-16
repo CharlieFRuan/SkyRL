@@ -9,8 +9,6 @@ DATA_DIR="$HOME/data/dapo"
 TRAIN_FILE="$DATA_DIR/dapo-math-17k-cleaned.parquet"
 TEST_FILE="$DATA_DIR/aime-2024-cleaned.parquet"
 NUM_NODES=1
-NUM_GPUS_PER_NODE=4
-NUM_INFERENCE_ENGINES=4
 INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE=1
 LOGGER="wandb"  # change to "console" to print to stdout
 
@@ -34,16 +32,16 @@ MAX_PROMPT_LENGTH=$((1024 * 2))
 MAX_RESPONSE_LENGTH=$((1024 * 8))
 
 # repro run parameters
-MINI_BATCH_SIZE=512
 N_SAMPLES_PER_PROMPT=16
 EVAL_N_SAMPLES_PER_PROMPT=32
 ENFORCE_EAGER=true # cuda graphs can cause some instability
 LR=1e-6
-: "${EVAL_CKPT_INTERVAL:=80}"
 
 # Fully async specific configuration knobs:
 : "${MAX_STALENESS_STEPS:=4}"
 : "${NUM_PARALLEL_GENERATION_WORKERS:=$(( 128 * (MAX_STALENESS_STEPS + 1) ))}"
+: "${MINI_BATCH_SIZE:=512}"
+: "${EVAL_CKPT_INTERVAL:=80}"
 
 RUN_NAME=dapo_qwen3_1.7b_base-async-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}-${NUM_GPUS_PER_NODE}train${NUM_INFERENCE_ENGINES}gen
 USE_TIS=true
@@ -77,7 +75,7 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo_fully_async
   trainer.policy.fsdp_config.fsdp_size=$NUM_GPUS_PER_NODE \
   generator.num_inference_engines=$NUM_INFERENCE_ENGINES \
   generator.inference_engine_tensor_parallel_size=$INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE \
-  trainer.epochs=20 \
+  trainer.epochs=3 \
   trainer.algorithm.eps_clip_low=$CLIP_RATIO_LOW \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.eval_batch_size=1024 \
@@ -86,8 +84,8 @@ uv run --isolated --extra vllm -m examples.algorithms.dapo.main_dapo_fully_async
   trainer.update_epochs_per_batch=1 \
   trainer.train_batch_size=$MINI_BATCH_SIZE \
   trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
-  trainer.micro_forward_batch_size_per_gpu=4 \
-  trainer.micro_train_batch_size_per_gpu=2 \
+  trainer.micro_forward_batch_size_per_gpu=8 \
+  trainer.micro_train_batch_size_per_gpu=4 \
   trainer.ckpt_interval=$EVAL_CKPT_INTERVAL \
   trainer.max_prompt_length=$MAX_PROMPT_LENGTH \
   generator.sampling_params.max_generate_length=$MAX_RESPONSE_LENGTH \

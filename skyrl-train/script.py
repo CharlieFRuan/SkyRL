@@ -2,33 +2,24 @@ import os
 import subprocess
 import time
 
-mini_batch_size = 256
 base_env = os.environ.copy()
-script = "/home/ray/default/SkyRL/skyrl-train/examples/fully_async/async_run_gsm8k.sh"
+script = "/home/ray/default/SkyRL/skyrl-train/examples/algorithms/dapo/run_dapo_qwen3_1.7b_aime_fullyAsync.sh"
 
-for ratio in ["4-4", "6-2"]:
+for mini_batch_size in [512, 128, 64]:
     for max_staleness in [1, 4, 8]:
         for max_concurrency_raio in [1, 2, 4, 8]:
-            if ratio == "4-4" and max_staleness == 1 or max_staleness == 4:
-                # already ran
-                continue
-
-            if ratio == "6-2":
-                num_inf_gpus = 6
-                num_train_gpus = 2
-            else:
-                num_inf_gpus = 4
-                num_train_gpus = 4
             if max_concurrency_raio > max_staleness + 1:
                 continue
             max_concurrency = mini_batch_size * (max_staleness + 1) // max_concurrency_raio
             if max_concurrency < mini_batch_size:
                 continue
+            
+            eval_ckpt_interval = 512 // mini_batch_size * 5
             my_env = {
-                "NUM_INFERENCE_GPUS": str(num_inf_gpus),
-                "NUM_POLICY_GPUS": str(num_train_gpus),
                 "MAX_STALENESS_STEPS": str(max_staleness),
                 "NUM_PARALLEL_GENERATION_WORKERS": str(max_concurrency),
+                "EVAL_CKPT_INTERVAL": str(eval_ckpt_interval),
+                "MINI_BATCH_SIZE": str(mini_batch_size),
             }
             env = {
                 **base_env,
