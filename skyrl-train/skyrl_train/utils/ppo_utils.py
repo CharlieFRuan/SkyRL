@@ -588,6 +588,7 @@ def ppo_policy_loss(
         # Apply truncated importance sampling -> https://fengyao.notion.site/off-policy-rl
         tis_imp_ratio = _safe_exp_delta(old_log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
         tis_imp_ratio = torch.clamp(tis_imp_ratio, max=config.tis_imp_ratio_cap)
+        logger_.info(f"TIS imp ratio mean: {tis_imp_ratio.mean().item()}")
         loss = loss * tis_imp_ratio
 
     loss = reduce_loss(loss, loss_mask, loss_reduction, config.max_seq_len)
