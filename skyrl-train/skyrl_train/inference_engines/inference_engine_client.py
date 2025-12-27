@@ -232,12 +232,22 @@ class InferenceEngineClient(InferenceEngineInterface):
             accum_response_ids.extend(new_response_ids)
             if new_response_logprobs is not None:
                 accum_response_logprobs.extend(new_response_logprobs)
+
+            # After accumulating tokens, check if a stop string was already generated
+            accum_text = self.tokenizer.decode(accum_response_ids)
+            if "stop" in sampling_params and any(stop_str in accum_text for stop_str in sampling_params["stop"]):
+                if stop_reason != "stop":
+                    logger.info(f"CHARLIE HIT THIS: {accum_text}")
+                    stop_reason = "stop"  # Don't continue generating
+                    break
+
             num_turns += 1
 
         # 4. Build the final response and return.
         if num_turns == 1:
             final_text_response = text_response
         else:
+            # Does vllm do special handling post processing text?
             final_text_response = self.tokenizer.decode(accum_response_ids, skip_special_tokens=True)
         return InferenceEngineOutput(
             responses=[final_text_response],

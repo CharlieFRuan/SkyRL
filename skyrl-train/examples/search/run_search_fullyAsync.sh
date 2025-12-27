@@ -9,14 +9,23 @@ set -x
 # path for dataset (.parquet files) containing the prompts and metadata for each question
 DATA_DIR="$HOME/data/searchR1"
 
-RUN_NAME="skyrl-search_4turns_maxgeneratelen_500-multiturn-sync-TIS_2.0-micro16-tp1-con256-base"
+# Fully async specific configuration knobs:
+: "${MAX_STALENESS_STEPS:=8}"
+: "${NUM_PARALLEL_GENERATION_WORKERS:=$(( 128 * (MAX_STALENESS_STEPS + 1) ))}"
+: "${MINI_BATCH_SIZE:=256}"
+: "${CKPT_INTERVAL:=40}"
 
 USE_TIS=true
 TIS_IMP_RATIO_CAP=2.0
 
-uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
+RUN_NAME=skyrl-search-base_4turns_maxgeneratelen_500-multiturn-async-micro16-retrievalOnGenGPUs-0.7Util-tp1-maxEnvWorkers256-maxConnections256-fixedStop-bs${MINI_BATCH_SIZE}-maxStale${MAX_STALENESS_STEPS}-numCon${NUM_PARALLEL_GENERATION_WORKERS}
+
+
+uv run --isolated --frozen --extra vllm -m examples.fully_async.main_async \
   data.train_data="['${DATA_DIR}/train.parquet']" \
   data.val_data="['${DATA_DIR}/validation.parquet']" \
+  trainer.fully_async.max_staleness_steps=${MAX_STALENESS_STEPS} \
+  trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.optimizer_config.lr=1.0e-6 \
   trainer.policy.optimizer_config.max_grad_norm=0.5 \
@@ -26,13 +35,13 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.algorithm.use_tis=$USE_TIS \
   trainer.algorithm.tis_imp_ratio_cap=$TIS_IMP_RATIO_CAP \
   trainer.policy.model.path="Qwen/Qwen2.5-3B" \
-  trainer.placement.colocate_all=true \
+  trainer.placement.colocate_all=false \
   trainer.strategy=fsdp2 \
   trainer.policy.fsdp_config.cpu_offload=false \
   trainer.ref.fsdp_config.cpu_offload=true \
-  trainer.placement.policy_num_gpus_per_node=8 \
-  trainer.placement.ref_num_gpus_per_node=8 \
-  generator.num_inference_engines=8 \
+  trainer.placement.policy_num_gpus_per_node=4 \
+  trainer.placement.ref_num_gpus_per_node=4 \
+  generator.num_inference_engines=4 \
   generator.inference_engine_tensor_parallel_size=1 \
   generator.backend=vllm \
   generator.run_engines_locally=true \
@@ -40,8 +49,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.gpu_memory_utilization=0.7 \
   trainer.epochs=1 \
   trainer.update_epochs_per_batch=1 \
-  trainer.train_batch_size=512 \
-  trainer.policy_mini_batch_size=256 \
+  trainer.train_batch_size=$MINI_BATCH_SIZE \
+  trainer.policy_mini_batch_size=$MINI_BATCH_SIZE \
   trainer.micro_forward_batch_size_per_gpu=16 \
   trainer.micro_train_batch_size_per_gpu=16 \
   trainer.max_prompt_length=2048 \
@@ -64,8 +73,8 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   trainer.logger="wandb" \
   trainer.project_name="searchr1-async" \
   trainer.run_name="${RUN_NAME}" \
-  trainer.ckpt_interval=20 \
-  trainer.hf_save_interval=400 \
+  trainer.ckpt_interval="${CKPT_INTERVAL}" \
+  trainer.hf_save_interval=800 \
   trainer.max_ckpts_to_keep=5 \
   trainer.resume_mode=latest \
   trainer.ckpt_path="$HOME/${RUN_NAME}" \
@@ -74,5 +83,5 @@ uv run --isolated --frozen --extra vllm -m skyrl_train.entrypoints.main_base \
   generator.eval_sampling_params.temperature=0 \
   generator.eval_sampling_params.stop='["</search>", "</answer>"]' \
   trainer.export_path="$HOME/${RUN_NAME}/exports" \
-  trainer.eval_interval=400 \
+  trainer.eval_interval=800 \
   $@
