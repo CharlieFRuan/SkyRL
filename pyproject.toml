@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "skyrl"
 version = "0.1.0"
@@ -5,9 +9,16 @@ description = "A Post-Training Stack for LLMs"
 authors = [
     { name = "NovaSkyAI Team"}
 ]
-license = { text = "MIT" }
+license = "MIT"
 readme = "README.md"
-requires-python = "==3.12.*"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+# Root package is metadata-only - actual code is in subdirectories:
+# - skyrl-train/  (install with: pip install ./skyrl-train[vllm])
+# - skyrl-gym/    (install with: pip install ./skyrl-gym)
+# - skyagent/     (install with: pip install ./skyagent)
+packages = []
 
 [tool.black]
 line-length = 120
