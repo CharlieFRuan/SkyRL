@@ -502,6 +502,10 @@ class PassRatioShaper(RewardShaper):
     to the fraction of tests passed.
     """
 
+    def __init__(self, **kwargs):
+        # Accept and ignore any kwargs for uniform interface
+        pass
+
     @classmethod
     def name(cls) -> str:
         return "pass_ratio"
@@ -522,6 +526,10 @@ class EffectivePassRatioShaper(RewardShaper):
     Treats xfailed (expected failures) as passes since the test behaved
     as expected. Excludes skipped tests from the denominator.
     """
+
+    def __init__(self, **kwargs):
+        # Accept and ignore any kwargs for uniform interface
+        pass
 
     @classmethod
     def name(cls) -> str:
@@ -553,6 +561,7 @@ class WeightedShaper(RewardShaper):
         weight_fail: float = 0.0,
         weight_error: float = 0.0,
         weight_xpass: float = 0.5,  # Unexpected pass - partial credit
+        **kwargs,  # Accept and ignore extra kwargs
     ):
         self.weight_pass = weight_pass
         self.weight_xfail = weight_xfail
@@ -602,6 +611,7 @@ class ThresholdShaper(RewardShaper):
         self,
         threshold: float = 1.0,
         below_threshold_scale: float = 0.5,
+        **kwargs,  # Accept and ignore extra kwargs
     ):
         """
         Args:
@@ -646,6 +656,7 @@ class BinaryWithPartialCreditShaper(RewardShaper):
         self,
         partial_threshold: float = 0.9,
         partial_credit: float = 0.5,
+        **kwargs,  # Accept and ignore extra kwargs
     ):
         self.partial_threshold = partial_threshold
         self.partial_credit = partial_credit
@@ -676,6 +687,10 @@ class OriginalRewardShaper(RewardShaper):
 
     Useful as a no-op option when reward shaping is disabled.
     """
+
+    def __init__(self, **kwargs):
+        # Accept and ignore any kwargs for uniform interface
+        pass
 
     @classmethod
     def name(cls) -> str:
