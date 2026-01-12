@@ -173,6 +173,9 @@ class PytestOutputParser(OutputParser):
         XFAIL test_file.py::test_name - reason
         XPASS test_file.py::test_name
         SKIPPED test_file.py::test_name - reason
+
+    Collection errors (where pytest can't load tests) are detected and
+    return None to signal unparseable output, falling back to original reward.
     """
 
     # Regex for the summary line at the end of pytest output
@@ -199,13 +202,45 @@ class PytestOutputParser(OutputParser):
         "skipped": re.compile(r"^SKIPPED\s+", re.MULTILINE),
     }
 
+    # Patterns that indicate pytest couldn't collect/load tests
+    # These are infrastructure failures, not agent failures
+    COLLECTION_ERROR_PATTERNS = [
+        re.compile(r"error during collection", re.IGNORECASE),
+        re.compile(r"Interrupted:.*error", re.IGNORECASE),
+        re.compile(r"no tests ran", re.IGNORECASE),
+        re.compile(r"collection error", re.IGNORECASE),
+        re.compile(r"import error", re.IGNORECASE),
+    ]
+
     @classmethod
     def name(cls) -> str:
         return "pytest"
 
+    def _is_collection_error(self, output: str) -> bool:
+        """Check if output indicates a pytest collection/import error."""
+        for pattern in self.COLLECTION_ERROR_PATTERNS:
+            if pattern.search(output):
+                return True
+        return False
+
     def parse(self, output: str) -> Optional[ParsedTestResult]:
-        """Parse pytest output to extract test counts."""
+        """Parse pytest output to extract test counts.
+
+        Returns None for collection errors (where pytest couldn't load tests),
+        which causes fallback to original reward rather than treating as 0/N failures.
+        """
         if not output:
+            return None
+
+        # Check for collection errors FIRST - these indicate pytest couldn't
+        # even load the tests, which is typically an infrastructure issue
+        # (bad test file, missing dependencies) not an agent failure.
+        # Return None to fall back to original verifier reward.
+        if self._is_collection_error(output):
+            logger.debug(
+                "Detected pytest collection error - skipping reward shaping. "
+                "Falling back to original verifier reward."
+            )
             return None
 
         # Try to find the summary line first (most reliable)
