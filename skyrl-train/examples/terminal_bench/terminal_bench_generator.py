@@ -59,6 +59,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.override_storage_mb = terminal_bench_cfg.get("override_storage_mb")
         self.override_cpus = terminal_bench_cfg.get("override_cpus")
 
+        # Model info for Harbor's hosted_vllm validation (token limits and costs)
+        model_info_cfg = terminal_bench_cfg.get("model_info", {})
+        self.model_info = {
+            "max_input_tokens": model_info_cfg.get("max_input_tokens", 32768),
+            "max_output_tokens": model_info_cfg.get("max_output_tokens", 8192),
+            "input_cost_per_token": model_info_cfg.get("input_cost_per_token", 0),
+            "output_cost_per_token": model_info_cfg.get("output_cost_per_token", 0),
+        }
+
         logger.info(f"TerminalBenchGenerator initialized with overrides: memory={self.override_memory_mb}, storage={self.override_storage_mb}, cpus={self.override_cpus}")
 
         # Read custom chat template
@@ -164,6 +173,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                         "max_episodes": self.max_episodes,
                         "session_id": session_id,
                         "enable_summarize": self.enable_summarize,
+                        "model_info": self.model_info,
                     },
                 ),
             )
@@ -175,6 +185,9 @@ class TerminalBenchGenerator(GeneratorInterface):
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
                     model_name=f"hosted_vllm/{model_alias}",
+                    kwargs={
+                        "model_info": self.model_info,
+                    },
                 ),
             )
         else:
