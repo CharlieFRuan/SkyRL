@@ -378,8 +378,11 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
         model_path = kwargs.get("model")
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        model_name = model_path
+        # Allow overriding the served model name (similar to vLLM's --served-model-name flag).
+        # Useful for Harbor/LiteLLM compatibility where model names must have exactly one '/'.
+        # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        served_model_name = kwargs.get("served_model_name")
+        model_name = served_model_name if served_model_name else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
         models = OpenAIServingModels(engine, model_config, base_model_paths)
