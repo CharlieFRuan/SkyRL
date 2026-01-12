@@ -317,7 +317,7 @@ class RayPPOTrainer:
                     # 2. print example just for debugging
                     vis_prompt = self.tokenizer.decode(generator_output["prompt_token_ids"][0])
                     vis_response = self.tokenizer.decode(generator_output["response_ids"][0])
-                    logger.info(
+                    logger.debug(
                         f"Example:\n"
                         f"  Prompt: {generator_input['prompts'][0]}\n"
                         f"  Input decoded: {vis_prompt}\n"

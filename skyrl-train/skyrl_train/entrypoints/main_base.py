@@ -82,10 +82,29 @@ class BasePPOExp:
         The `cfg` passed here will be the final config from Hydra, including CLI overrides.
         """
         self.cfg = cfg
+        # Configure SkyRL log level from config
+        self._configure_log_level()
         self.tokenizer = self.get_tokenizer()
         self.train_dataset = self.get_train_dataset()
         self.eval_dataset = self.get_eval_dataset()
         self.colocate_pg = self.get_colocate_pg()
+
+    def _configure_log_level(self):
+        """Configure loguru log level from trainer config."""
+        import sys
+        log_level = getattr(self.cfg.trainer, "log_level", "INFO").upper()
+        # Remove default handler and add one with configured level
+        logger.remove()
+        logger.add(
+            sys.stderr,
+            level=log_level,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+                   "<level>{level: <8}</level> | "
+                   "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
+                   "<level>{message}</level>",
+            colorize=True,
+        )
+        logger.info(f"SkyRL log level set to: {log_level}")
 
     @staticmethod
     def get_cfg_as_str(dict_cfg: DictConfig) -> str:
