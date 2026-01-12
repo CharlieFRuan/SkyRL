@@ -133,6 +133,34 @@ ORCHESTRATOR_SCHEMA = SectionSchema(
     }
 )
 
+# Logging config fields
+LOGGING_SCHEMA = SectionSchema(
+    fields={
+        # Log level for Harbor (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        "log_level": FieldMapping("log_level", default="WARNING"),
+    }
+)
+
+# Reward shaping config fields
+REWARD_SHAPING_SCHEMA = SectionSchema(
+    fields={
+        # Parser for test output (pytest, unittest, generic, or None for auto-detect)
+        "reward_parser": FieldMapping("reward_parser", default=None),
+        # Shaper strategy (pass_ratio, effective_pass_ratio, weighted, threshold, binary_partial, original)
+        "reward_shaper": FieldMapping("reward_shaper", default="pass_ratio"),
+        # Whether to enable reward shaping (if False, uses original binary reward)
+        "enable_reward_shaping": FieldMapping("enable_reward_shaping", default=True),
+        # Fallback to original reward if parsing fails
+        "reward_shaping_fallback": FieldMapping("reward_shaping_fallback", default=True),
+        # Threshold shaper params
+        "reward_threshold": FieldMapping("reward_threshold", default=1.0),
+        "below_threshold_scale": FieldMapping("below_threshold_scale", default=0.5),
+        # Binary partial shaper params
+        "partial_threshold": FieldMapping("partial_threshold", default=0.9),
+        "partial_credit": FieldMapping("partial_credit", default=0.5),
+    }
+)
+
 # Complete schema registry
 HARBOR_SCHEMA = {
     "agent": AGENT_SCHEMA,
@@ -141,6 +169,8 @@ HARBOR_SCHEMA = {
     "trial": TRIAL_SCHEMA,
     "retry": RETRY_SCHEMA,
     "orchestrator": ORCHESTRATOR_SCHEMA,
+    "logging": LOGGING_SCHEMA,
+    "reward_shaping": REWARD_SHAPING_SCHEMA,
 }
 
 
@@ -366,6 +396,57 @@ class HarborConfigBuilder:
             value = self._get_field_value("n_concurrent_trials", mapping, self._cfg)
             if value is not None:
                 return int(value)
+        return default
+
+    def get_reward_shaping_config(self) -> Dict[str, Any]:
+        """
+        Get reward shaping configuration for terminal bench generator.
+
+        Returns:
+            Dict with keys:
+                - enable_reward_shaping: bool
+                - reward_parser: str | None (pytest, unittest, generic, or None for auto)
+                - reward_shaper: str (pass_ratio, effective_pass_ratio, weighted, etc.)
+                - reward_shaping_fallback: bool
+                - shaper_kwargs: dict with shaper-specific params
+        """
+        config = {}
+
+        for yaml_key, mapping in REWARD_SHAPING_SCHEMA.fields.items():
+            value = self._get_field_value(yaml_key, mapping, self._cfg)
+            if value is not None:
+                config[yaml_key] = value
+
+        # Build shaper kwargs from threshold/partial params
+        shaper_kwargs = {}
+        if "reward_threshold" in config:
+            shaper_kwargs["threshold"] = config.pop("reward_threshold")
+        if "below_threshold_scale" in config:
+            shaper_kwargs["below_threshold_scale"] = config.pop("below_threshold_scale")
+        if "partial_threshold" in config:
+            shaper_kwargs["partial_threshold"] = config.pop("partial_threshold")
+        if "partial_credit" in config:
+            shaper_kwargs["partial_credit"] = config.pop("partial_credit")
+
+        config["shaper_kwargs"] = shaper_kwargs
+
+        return config
+
+    def get_log_level(self, default: str = "WARNING") -> str:
+        """
+        Get the log level for Harbor.
+
+        Args:
+            default: Default log level if not specified in config.
+
+        Returns:
+            Log level string (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        """
+        mapping = LOGGING_SCHEMA.fields.get("log_level")
+        if mapping:
+            value = self._get_field_value("log_level", mapping, self._cfg)
+            if value is not None:
+                return str(value).upper()
         return default
 
     def build_trial_config(

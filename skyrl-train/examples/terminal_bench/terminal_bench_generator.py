@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 from loguru import logger
@@ -7,6 +8,7 @@ from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, Gene
 from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
+from skyrl_train.utils.reward_shaping import shape_reward_from_output
 from omegaconf import DictConfig
 from pathlib import Path
 
@@ -56,6 +58,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
         self._harbor_config_builder = HarborConfigBuilder(terminal_bench_cfg)
 
+        # Configure Harbor log level (default WARNING to reduce noise)
+        harbor_log_level = self._harbor_config_builder.get_log_level(default="WARNING")
+        self._configure_harbor_logging(harbor_log_level)
+
         # Store model_info for external access (e.g., metrics)
         self.model_info = self._harbor_config_builder.model_info
 
@@ -65,12 +71,17 @@ class TerminalBenchGenerator(GeneratorInterface):
             default=16  # Reasonable default for parallel trial execution
         )
 
+        # Reward shaping config (parses test output for partial credit)
+        self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
+
         logger.info(
             f"TerminalBenchGenerator initialized with HarborConfigBuilder. "
             f"Exposed fields: {list(self._harbor_config_builder._harbor_cfg.keys())}. "
             f"Retry config: max_retries={self._retry_config.max_retries}, "
             f"backoff={self._retry_config.min_wait_sec}-{self._retry_config.max_wait_sec}s. "
-            f"Concurrent trials: {self._n_concurrent_trials}"
+            f"Concurrent trials: {self._n_concurrent_trials}. "
+            f"Reward shaping: enabled={self._reward_shaping_config.get('enable_reward_shaping', True)}, "
+            f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}"
         )
 
         # Read custom chat template
@@ -81,6 +92,34 @@ class TerminalBenchGenerator(GeneratorInterface):
             logger.info(f"TerminalBenchGenerator initialized with custom chat template read from: {custom_chat_template_path}")
         else:
             self.custom_chat_template_content = None
+
+    def _configure_harbor_logging(self, level: str) -> None:
+        """
+        Configure Harbor's logging level.
+
+        Args:
+            level: Log level string (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        """
+        log_level = getattr(logging, level.upper(), logging.WARNING)
+
+        # Set level for Harbor's main logger and all child loggers
+        harbor_loggers = [
+            "harbor",
+            "harbor.trial",
+            "harbor.agents",
+            "harbor.verifier",
+            "harbor.orchestrators",
+            "harbor.environments",
+            "harbor.utils.logger",
+        ]
+
+        for logger_name in harbor_loggers:
+            logging.getLogger(logger_name).setLevel(log_level)
+
+        # Also set the root harbor logger
+        logging.getLogger("harbor").setLevel(log_level)
+
+        logger.info(f"Harbor logging level set to {level}")
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
@@ -245,7 +284,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Extract data from successful trial
         try:
-            reward = result.verifier_result.rewards["reward"]
+            original_reward = result.verifier_result.rewards["reward"]
             chat_history = result.agent_result.metadata['all_messages']
             summarization_count = result.agent_result.metadata['summarization_count']
         except (KeyError, AttributeError, TypeError) as e:
@@ -261,6 +300,24 @@ class TerminalBenchGenerator(GeneratorInterface):
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
             )
+
+        # Apply reward shaping if enabled
+        if self._reward_shaping_config.get("enable_reward_shaping", True):
+            verifier_stdout = getattr(result.verifier_result, "stdout", None)
+            reward = shape_reward_from_output(
+                stdout=verifier_stdout,
+                original_reward=original_reward,
+                parser_name=self._reward_shaping_config.get("reward_parser"),
+                shaper_name=self._reward_shaping_config.get("reward_shaper", "pass_ratio"),
+                shaper_kwargs=self._reward_shaping_config.get("shaper_kwargs", {}),
+                fallback_to_original=self._reward_shaping_config.get("reward_shaping_fallback", True),
+            )
+            if reward != original_reward:
+                logger.debug(
+                    f"Trajectory {trajectory_id}: reward shaped {original_reward:.3f} -> {reward:.3f}"
+                )
+        else:
+            reward = original_reward
 
         # Validate chat history structure
         if not chat_history or len(chat_history) < 2 or chat_history[0]["role"] != "user":
