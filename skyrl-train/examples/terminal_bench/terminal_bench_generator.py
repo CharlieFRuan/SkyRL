@@ -146,6 +146,10 @@ class TerminalBenchGenerator(GeneratorInterface):
             override_storage_mb=self.override_storage_mb,
         )
 
+        # Harbor expects hosted_vllm model names with exactly one '/'.
+        # Convert HuggingFace-style "org/model" to just "model" for the alias.
+        model_alias = self.model_name.split("/")[-1] if "/" in self.model_name else self.model_name
+
         if self.agent_name == "terminus":
             trial_config = TrialConfig(
                 task=TaskConfig(path=prompt),
@@ -153,7 +157,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 environment=environment_config,
                 agent=AgentConfig(
                     name=AgentName.TERMINUS_2.value,
-                    model_name=f"hosted_vllm/{self.model_name}",
+                    model_name=f"hosted_vllm/{model_alias}",
                     kwargs={
                         "api_base": f"{self.base_url}/v1",
                         "key": "fake_key",
@@ -170,7 +174,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                 environment=environment_config,
                 agent=AgentConfig(
                     name=AgentName.ORACLE,
-                    model_name=f"hosted_vllm/{self.model_name}",
+                    model_name=f"hosted_vllm/{model_alias}",
                 ),
             )
         else:
