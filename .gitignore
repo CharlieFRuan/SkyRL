@@ -40,3 +40,9 @@ docs/_spelling/
 
 *.log
 trials/
+
+# SQLite database files
+*.db
+
+# uv lock files
+uv.lock

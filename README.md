@@ -2,20 +2,9 @@
 
 # SkyRL: A Modular Full-stack RL Library for LLMs
 
-
-[![🌐 NovaSky](https://img.shields.io/badge/-Visit%20Website-5865F2?style=for-the-badge)](https://novasky-ai.github.io/) [![Github](https://img.shields.io/badge/SkyRL-000000?style=for-the-badge&logo=github&logoColor=000&logoColor=white)](https://github.com/NovaSky-AI/SkyRL) [![Twitter](https://img.shields.io/badge/NovaSky-white?style=for-the-badge&logo=X&logoColor=000&color=000&labelColor=white)](https://x.com/NovaSkyAI) [![Hugging Face Collection](https://img.shields.io/badge/NovaSky-fcd022?style=for-the-badge&logo=huggingface&logoColor=000&labelColor)](https://huggingface.co/NovaSky-AI) [![Discord](https://img.shields.io/badge/NovaSky-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/cJF2JUaaAN) [![Documentation](https://img.shields.io/badge/Documentation-blue?style=for-the-badge&logo=readthedocs&logoColor=white)](https://skyrl.readthedocs.io/en/latest/)
-
-
-
-<div align="center" style="font-family: Arial, sans-serif;">
-  <p>
-    <a href="#news" style="text-decoration: none; font-weight: bold;">News</a> •
-    <a href="#links" style="text-decoration: none; font-weight: bold;">Links</a> •
-    <a href="#getting-started" style="text-decoration: none; font-weight: bold;">Getting Started</a> •
-    <a href="#citation" style="text-decoration: none; font-weight: bold;">Citation</a> •
-    <a href="#acknowledgement" style="text-decoration: none; font-weight: bold;">Acknowledgement</a> 
-  </p>
-</div>
+<p align="center">
+| <a href="https://skyrl.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://x.com/NovaSkyAI"><b>Twitter/X</b></a> | <a href="https://huggingface.co/NovaSky-AI"><b>Huggingface</b></a> | <a href="https://join.slack.com/t/skyrl/shared_invite/zt-3f6ncn5b8-QawzK3uks6ka3KWoLwsi5Q"><b>Slack Workspace</b></a> |
+</p>
 
 </div>
 
