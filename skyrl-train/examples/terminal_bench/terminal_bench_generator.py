@@ -52,7 +52,6 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
-        self.agent_name = terminal_bench_cfg.agent_name
 
         # Schema-driven Harbor config builder
         # Automatically maps YAML fields to Harbor's TrialConfig with validation
@@ -151,7 +150,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             trial_config = self._harbor_config_builder.build_trial_config(
                 task_path=prompt,
                 trials_dir=self.trials_dir,
-                agent_name=self.agent_name,
                 model_name=f"hosted_vllm/{model_alias}",
                 api_base=f"{self.base_url}/v1",
                 session_id=session_id,

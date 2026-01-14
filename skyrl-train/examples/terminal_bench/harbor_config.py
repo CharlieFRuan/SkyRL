@@ -11,11 +11,15 @@ Usage:
     trial_config = builder.build_trial_config(
         task_path=prompt,
         trials_dir=self.trials_dir,
-        agent_name="terminus",
         model_name="hosted_vllm/Qwen3-8B",
         api_base="http://localhost:8000/v1",
         session_id=session_id,
     )
+
+Agent name is now read from the harbor config section (defaults to "terminus-2"):
+    terminal_bench:
+      harbor:
+        name: terminus-2  # Harbor AgentName value
 """
 
 from __future__ import annotations
@@ -76,6 +80,7 @@ class SectionSchema:
 AGENT_SCHEMA = SectionSchema(
     fields={
         # Direct fields on AgentConfig
+        "name": FieldMapping("name", default="terminus-2"),  # Maps to AgentConfig.name (Harbor AgentName)
         "override_timeout_sec": FieldMapping("override_timeout_sec"),
         "override_setup_timeout_sec": FieldMapping("override_setup_timeout_sec"),
         "max_timeout_sec": FieldMapping("max_timeout_sec"),
@@ -453,7 +458,6 @@ class HarborConfigBuilder:
         self,
         task_path: str,
         trials_dir: str,
-        agent_name: str,
         model_name: str,
         api_base: str,
         session_id: str,
@@ -464,7 +468,6 @@ class HarborConfigBuilder:
         Args:
             task_path: Path to the task directory.
             trials_dir: Directory for trial outputs.
-            agent_name: Agent type ("terminus" or "oracle").
             model_name: Model name for Harbor (e.g., "hosted_vllm/Qwen3-8B").
             api_base: Base URL for the inference API.
             session_id: Session ID for sticky routing.
@@ -486,17 +489,13 @@ class HarborConfigBuilder:
             "model_info": self._model_info,
         })
 
-        # Determine agent name enum
-        if agent_name == "terminus":
-            harbor_agent_name = AgentName.TERMINUS_2.value
-        elif agent_name == "oracle":
-            harbor_agent_name = AgentName.ORACLE.value
-        else:
-            raise ValueError(f"Unknown agent name: {agent_name}")
+        # Get agent name from harbor config (defaults to "terminus-2")
+        # This is the Harbor AgentName value directly (e.g., "terminus-2", "oracle")
+        agent_name = agent_direct_fields.pop("name", "terminus-2")
 
         # Build AgentConfig
         agent_config = AgentConfig(
-            name=harbor_agent_name,
+            name=agent_name,
             model_name=model_name,
             kwargs=agent_kwargs,
             **agent_direct_fields,
