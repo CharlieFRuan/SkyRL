@@ -412,15 +412,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         await self.async_sync_policy_weights_to_inference_engines()
                         await self.inference_engine_client.resume_generation()
 
-                # 5. Set logs for this training step.
-                logger.info(status)
-                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
-                self.all_metrics = {}
-                pbar.update(1)
-
-                # 6. Eval and checkpointing if needed.
+                # 5. Eval and checkpointing if needed.
                 # NOTE(Charlie): eval does not overlap with training, but can overlap with generation. Is it fine?
+                if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
+                    with Timer("save_checkpoints", self.all_timings):
+                        await asyncio.to_thread(self.save_checkpoints)
+                if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
+                    with Timer("save_hf_model", self.all_timings):
+                        await asyncio.to_thread(self.save_models)
                 if self.cfg.trainer.eval_interval > 0 and (
                     self.global_step % self.cfg.trainer.eval_interval == 0
                     or self.global_step == self.total_training_steps
@@ -428,14 +427,19 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
-                if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await asyncio.to_thread(self.save_checkpoints)
-                if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer("save_hf_model", self.all_timings):
-                        await asyncio.to_thread(self.save_models)
-                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+
+                # 6. Set logs for this training step (including eval metrics if eval ran).
+                # Mirrors sync trainer: combine all metrics + timing into single log call.
+                logger.info(status)
+                self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                log_payload = {
+                    **self.all_metrics,
+                    **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                }
+                self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+                self.all_metrics = {}
                 self.all_timings = {}
+                pbar.update(1)
                 self.global_step += 1
 
                 # 7. Notify generation workers that the capacity has increased, unblocking them.
