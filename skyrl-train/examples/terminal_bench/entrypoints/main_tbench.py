@@ -11,6 +11,7 @@ from skyrl_train.utils.utils import initialize_ray
 from examples.terminal_bench.terminal_bench_generator import TerminalBenchGenerator
 from examples.terminal_bench.dataset import TerminalBenchTaskDataset
 from skyrl_train.fully_async_trainer import FullyAsyncRayPPOTrainer
+from skyrl_train.trainer import RayPPOTrainer
 
 class TerminalBenchExp(BasePPOExp):
     def get_generator(self, cfg, tokenizer, inference_engine_client):
@@ -63,7 +64,16 @@ class TerminalBenchExp(BasePPOExp):
         generator,
         colocate_pg,
     ):
-        return FullyAsyncRayPPOTrainer(
+        # Check if async training is configured via placement.colocate_all=false
+        # Async training requires non-colocated placement (separate GPU sets for policy/ref/inference)
+        use_async = (
+            hasattr(cfg.trainer, "placement")
+            and cfg.trainer.placement is not None
+            and getattr(cfg.trainer.placement, "colocate_all", True) is False
+        )
+
+        trainer_cls = FullyAsyncRayPPOTrainer if use_async else RayPPOTrainer
+        return trainer_cls(
             cfg=cfg,
             tracker=tracker,
             tokenizer=tokenizer,
