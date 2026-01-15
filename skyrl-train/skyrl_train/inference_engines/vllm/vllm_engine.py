@@ -430,8 +430,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
+        # vLLM 0.10+ requires model_config parameter
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
+            model_config=model_config,
             models=models,
             response_role="assistant",
             request_logger=None,
@@ -442,8 +444,10 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
+        # vLLM 0.10+ requires model_config parameter
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
+            model_config=model_config,
             models=models,
             request_logger=None,
         )
