@@ -5,7 +5,7 @@ from typing import List, Optional, Dict, Any
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
+from skyrl_train.generators.utils import get_rollout_metrics
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.reward_shaping import shape_reward_from_output
@@ -29,6 +29,7 @@ class TerminalBenchAgentOutput:
     prompt_ids: List[int]
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
+    rollout_logprobs: Optional[List[float]] = None
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -363,6 +364,8 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Truncate to maximum allowed length
         response_ids = response_ids[:max_response_tokens]
         loss_mask = loss_mask[:max_response_tokens]
+        if rollout_logprobs is not None:
+            rollout_logprobs = rollout_logprobs[:max_response_tokens]
 
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
@@ -371,5 +374,6 @@ class TerminalBenchGenerator(GeneratorInterface):
             loss_mask=loss_mask,
             prompt_ids=prompt_ids,
             trajectory_id=trajectory_id,
+            rollout_logprobs=rollout_logprobs,
             summarization_count=summarization_count,
         )
