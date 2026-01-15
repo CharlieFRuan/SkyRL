@@ -88,6 +88,10 @@ AGENT_SCHEMA = SectionSchema(
         "max_episodes": FieldMapping("max_episodes", field_type="kwargs", default=16),
         "enable_summarize": FieldMapping("enable_summarize", field_type="kwargs", default=True),
         "store_all_messages": FieldMapping("store_all_messages", field_type="kwargs", default=True),
+        # Thinking/reasoning settings
+        "interleaved_thinking": FieldMapping("interleaved_thinking", field_type="kwargs", default=False),
+        # Extra body params passed to LLM API (e.g., chat_template_kwargs for enable_thinking)
+        "extra_body": FieldMapping("extra_body", field_type="kwargs"),
     }
 )
 
