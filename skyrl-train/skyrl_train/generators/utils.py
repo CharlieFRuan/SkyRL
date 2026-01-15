@@ -344,7 +344,7 @@ def prepare_generator_input(
     return generator_input, uids
 
 
-def encode_messages_subset(messages: ConversationType, tokenizer):
+def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_template=None):
     """Encodes a subset of messages from a multi-turn conversation using the fixed base approach.
 
     This function tokenizes messages as if they are part of a larger conversation, ensuring
@@ -367,6 +367,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message. These are assumed to be a subset from a larger conversation.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
+        custom_chat_template: Optional custom chat template string to use instead of tokenizer's default.
 
     Returns:
         List[int]: Token IDs for the given messages, with proper multi-turn context handling.
@@ -381,6 +382,7 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         base_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=custom_chat_template,
     )
 
     full_conversation = base_conversation + messages
@@ -388,12 +390,13 @@ def encode_messages_subset(messages: ConversationType, tokenizer):
         full_conversation,
         add_generation_prompt=False,
         tokenize=True,
+        chat_template=custom_chat_template,
     )
     conversation_token_ids = full_conversation_token_ids[len(base_conversation_token_ids) :]
     return conversation_token_ids
 
 
-def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None):
+def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
     """
     Get the response ids and loss mask from a list of messages.
 
@@ -406,6 +409,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
         assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
                 `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+        custom_chat_template: Optional custom chat template string to use instead of tokenizer's default.
 
     Returns:
         Tuple[List[int], List[int], Optional[List[float]]]: response ids, loss mask, and rollout logprobs
@@ -424,7 +428,7 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     for i in range(len(messages)):
         # 2. Use fixed base approach to encode the message and accumulate
         cur_message = messages[i]
-        cur_token_ids = encode_messages_subset([cur_message], tokenizer)
+        cur_token_ids = encode_messages_subset([cur_message], tokenizer, custom_chat_template)
         response_ids.extend(cur_token_ids)
 
         # 3. Set loss mask and rollout logprobs.
