@@ -191,6 +191,8 @@ trainer:
   project_name: "skyrl"
   run_name: "test_run"
   logger: "wandb"
+  # Whether to commit/sync to WandB after each training step (useful for async training to see real-time updates)
+  tracker_commit_each_step: false
   dump_data_batch: false
   dump_eval_results: true
   # SkyRL logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)

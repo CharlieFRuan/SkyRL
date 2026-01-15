@@ -350,7 +350,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step)
+                self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -415,7 +415,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # 5. Set logs for this training step.
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step)
+                self.tracker.log(self.all_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
                 self.all_metrics = {}
                 pbar.update(1)
 
@@ -434,7 +434,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
                     with Timer("save_hf_model", self.all_timings):
                         await asyncio.to_thread(self.save_models)
-                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
+                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
                 self.all_timings = {}
                 self.global_step += 1
 
