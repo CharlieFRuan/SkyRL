@@ -440,16 +440,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 self.all_metrics = {}
                 self.all_timings = {}
                 pbar.update(1)
+
+                # Validate consumed data UIDs BEFORE incrementing global_step
+                # Skip validation at epoch boundaries where modulo wraps to 0
+                # This fixes the bug where the formula gives expected=0 at epoch end
+                steps_into_epoch = self.global_step % self.num_steps_per_epoch
+                if steps_into_epoch != 0:  # Skip at epoch boundaries
+                    expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
+                    actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
+                    assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
+                        "Unexpected number of consumed data UIDs. Got: "
+                        f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
+                    )
+
                 self.global_step += 1
 
                 # 7. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
-                expected_consumed_in_epoch = self.mini_batch_size * ((self.global_step - 1) % self.num_steps_per_epoch)
-                actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
-                assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
-                    "Unexpected number of consumed data UIDs. Got: "
-                    f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
-                )
 
             # 8. Per-epoch epilogue.
             if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
