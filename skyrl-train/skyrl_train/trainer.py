@@ -152,6 +152,29 @@ class RayPPOTrainer:
         """
         Main training loop for PPO
         """
+        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
+        # This must happen before any generate() calls
+        try:
+            await self.generator.startup()
+            logger.info("Generator startup complete")
+        except Exception as e:
+            logger.error(f"Generator startup failed: {e}")
+            raise
+
+        try:
+            await self._train_loop()
+        finally:
+            # Ensure generator cleanup happens even if training fails
+            try:
+                await self.generator.shutdown()
+                logger.info("Generator shutdown complete")
+            except Exception as e:
+                logger.warning(f"Generator shutdown error (non-fatal): {e}")
+
+    async def _train_loop(self):
+        """
+        Internal training loop, separated for proper generator lifecycle management.
+        """
         # Initialize weight sync state between policy model and inference engines.
         with Timer("init_weight_sync_state"):
             self.init_weight_sync_state()

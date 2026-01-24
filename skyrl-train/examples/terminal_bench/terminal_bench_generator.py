@@ -20,6 +20,9 @@ from harbor.models.trial.result import TrialResult
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
 
+# Maximum restart attempts for orchestrator recovery
+MAX_ORCHESTRATOR_RESTART_ATTEMPTS = 3
+
 @dataclass
 class TerminalBenchAgentOutput:
     response_ids: List[int]
@@ -102,6 +105,15 @@ class TerminalBenchGenerator(GeneratorInterface):
         else:
             self.custom_chat_template_content = None
 
+        # Shared QueueOrchestrator state (initialized in startup())
+        # This ensures all concurrent generate() calls share a single orchestrator
+        # with a global n_concurrent_trials limit, rather than each worker creating
+        # its own orchestrator (which would multiply the concurrency limit)
+        self._orchestrator: Optional[QueueOrchestrator] = None
+        self._orchestrator_lock: Optional[asyncio.Lock] = None  # Protects orchestrator lifecycle
+        self._orchestrator_started: bool = False
+        self._orchestrator_restart_count: int = 0
+
     def _configure_harbor_logging(self, level: str) -> None:
         """
         Configure Harbor's logging level.
@@ -130,14 +142,148 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         logger.info(f"Harbor logging level set to {level}")
 
+    async def startup(self) -> None:
+        """Initialize shared QueueOrchestrator for all generate() calls.
+
+        This creates a single orchestrator that enforces the n_concurrent_trials
+        limit globally across all async workers. Without this, each generate()
+        call would create its own orchestrator, multiplying the concurrency limit.
+
+        Called once by the trainer before the first generate() call.
+        """
+        self._orchestrator_lock = asyncio.Lock()
+        await self._create_orchestrator()
+        logger.info(
+            f"TerminalBenchGenerator startup complete. "
+            f"Shared orchestrator ready with n_concurrent_trials={self._n_concurrent_trials}"
+        )
+
+    async def _create_orchestrator(self) -> None:
+        """Create and start a new QueueOrchestrator.
+
+        Used for initial startup and for recovery after orchestrator failures.
+        """
+        self._orchestrator = QueueOrchestrator(
+            trial_configs=[],  # We submit dynamically via submit_batch()
+            n_concurrent_trials=self._n_concurrent_trials,
+            metrics={},  # SkyRL handles its own metrics
+            quiet=True,
+            retry_config=self._retry_config,
+        )
+        await self._orchestrator.start()
+        self._orchestrator_started = True
+        logger.info(
+            f"QueueOrchestrator created and started with "
+            f"n_concurrent_trials={self._n_concurrent_trials}"
+        )
+
+    async def _restart_orchestrator(self) -> bool:
+        """Restart the orchestrator after a failure.
+
+        Uses locking to ensure only one restart happens at a time, even with
+        concurrent generate() calls. Other callers wait for the restart to complete.
+
+        Returns:
+            True if restart succeeded, False if max attempts exceeded.
+        """
+        async with self._orchestrator_lock:
+            # Check if another caller already restarted while we were waiting
+            if self._orchestrator_started and self._orchestrator is not None:
+                logger.info("Orchestrator already restarted by another caller")
+                return True
+
+            self._orchestrator_restart_count += 1
+            if self._orchestrator_restart_count > MAX_ORCHESTRATOR_RESTART_ATTEMPTS:
+                logger.error(
+                    f"Max orchestrator restart attempts ({MAX_ORCHESTRATOR_RESTART_ATTEMPTS}) "
+                    f"exceeded. Giving up."
+                )
+                return False
+
+            logger.warning(
+                f"Restarting QueueOrchestrator (attempt {self._orchestrator_restart_count}/"
+                f"{MAX_ORCHESTRATOR_RESTART_ATTEMPTS})"
+            )
+
+            # Shutdown the failed orchestrator if it exists
+            if self._orchestrator is not None:
+                try:
+                    await self._orchestrator.shutdown(wait=False)
+                except Exception as e:
+                    logger.warning(f"Error shutting down failed orchestrator: {e}")
+                finally:
+                    self._orchestrator = None
+                    self._orchestrator_started = False
+
+            # Create a new orchestrator
+            try:
+                await self._create_orchestrator()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to create new orchestrator: {e}")
+                self._orchestrator_started = False
+                return False
+
+    async def shutdown(self) -> None:
+        """Cleanup shared QueueOrchestrator.
+
+        Called once by the trainer after the last generate() call.
+        Safe to call multiple times (idempotent).
+        """
+        if self._orchestrator_lock is None:
+            # startup() was never called
+            return
+
+        async with self._orchestrator_lock:
+            if self._orchestrator is not None and self._orchestrator_started:
+                try:
+                    logger.info("Shutting down shared QueueOrchestrator...")
+                    await self._orchestrator.shutdown(wait=True)
+                    logger.info("QueueOrchestrator shutdown complete")
+                except Exception as e:
+                    logger.warning(f"Error during orchestrator shutdown: {e}")
+                finally:
+                    self._orchestrator_started = False
+                    self._orchestrator = None
+
+    def _create_all_failed_output(
+        self,
+        trajectory_ids: List[TrajectoryID],
+        exception_type: str = "OrchestratorFailure",
+    ) -> GeneratorOutput:
+        """Create a GeneratorOutput where all trajectories failed.
+
+        Used when the orchestrator itself fails and cannot process any trials.
+        All outputs are marked as infrastructure failures (excluded from baseline).
+        """
+        num_trials = len(trajectory_ids)
+        return {
+            "prompt_token_ids": [[0] for _ in range(num_trials)],
+            "response_ids": [[0] for _ in range(num_trials)],
+            "rewards": [0.0 for _ in range(num_trials)],
+            "loss_masks": [[0] for _ in range(num_trials)],
+            "stop_reasons": ["error" for _ in range(num_trials)],
+            "rollout_metrics": {
+                "generate/num_failed_instances": num_trials,
+                "generate/num_failed_trajectories": num_trials,
+                "generate/num_masked_trajectories": num_trials,
+                f"generate/exception_{exception_type}": num_trials,
+            },
+            "rollout_logprobs": None,
+            "exclude_from_baseline": [True for _ in range(num_trials)],  # Infrastructure failure
+        }
+
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
-        Generate rollouts for a batch of prompts using Harbor's QueueOrchestrator.
+        Generate rollouts for a batch of prompts using the shared QueueOrchestrator.
 
-        The QueueOrchestrator handles:
-        - Concurrency control (n_concurrent_trials workers)
+        The shared QueueOrchestrator (created in startup()) handles:
+        - Global concurrency control across all async workers
         - Retry logic with exponential backoff
         - Exception filtering (retry transient errors, skip permanent ones)
+
+        This method includes restart logic to recover from orchestrator failures
+        without killing the entire training job.
         """
         num_trials = len(input_batch["prompts"])
         logger.info(f"Starting batch generation for {num_trials} trials")
@@ -167,29 +313,62 @@ class TerminalBenchGenerator(GeneratorInterface):
             trial_configs.append(trial_config)
             trajectory_ids.append(trajectory_id)
 
-        # Create QueueOrchestrator with retry config and concurrency control
-        orchestrator = QueueOrchestrator(
-            trial_configs=[],  # We'll submit dynamically
-            n_concurrent_trials=min(self._n_concurrent_trials, num_trials),
-            metrics={},  # SkyRL handles its own metrics
-            quiet=True,
-            retry_config=self._retry_config,
-        )
+        # Check if orchestrator is available (startup() must have been called)
+        if not self._orchestrator_started or self._orchestrator is None:
+            logger.error(
+                "QueueOrchestrator not available. Was startup() called? "
+                "Attempting emergency restart..."
+            )
+            restart_success = await self._restart_orchestrator()
+            if not restart_success:
+                logger.error("Emergency orchestrator restart failed. Returning all-failed output.")
+                return self._create_all_failed_output(trajectory_ids, "OrchestratorNotStarted")
 
-        # Start the orchestrator worker pool
-        await orchestrator.start()
-
+        # Submit trials to shared orchestrator with restart logic on failure
+        results: List[TrialResult | Exception] = []
         try:
             # Submit all trials and collect futures
-            futures = await orchestrator.submit_batch(trial_configs)
+            futures = await self._orchestrator.submit_batch(trial_configs)
 
             # Wait for all trials to complete
-            results: List[TrialResult | Exception] = await asyncio.gather(
-                *futures, return_exceptions=True
+            # Note: return_exceptions=True ensures individual trial failures don't
+            # bubble up as exceptions - they're returned as Exception objects in results
+            results = await asyncio.gather(*futures, return_exceptions=True)
+
+        except Exception as orchestrator_error:
+            # Orchestrator-level failure (not individual trial failures)
+            # This indicates something is wrong with the orchestrator itself
+            logger.error(
+                f"Orchestrator-level failure during batch submission/gather: "
+                f"{type(orchestrator_error).__name__}: {orchestrator_error}"
             )
-        finally:
-            # Always shutdown the orchestrator
-            await orchestrator.shutdown(wait=True)
+
+            # Attempt to restart the orchestrator
+            restart_success = await self._restart_orchestrator()
+            if not restart_success:
+                logger.error(
+                    "Orchestrator restart failed. Returning all-failed output "
+                    "to avoid killing training job."
+                )
+                return self._create_all_failed_output(
+                    trajectory_ids,
+                    f"OrchestratorFailure_{type(orchestrator_error).__name__}"
+                )
+
+            # Retry once with the fresh orchestrator
+            try:
+                logger.info(f"Retrying batch of {num_trials} trials with restarted orchestrator")
+                futures = await self._orchestrator.submit_batch(trial_configs)
+                results = await asyncio.gather(*futures, return_exceptions=True)
+            except Exception as retry_error:
+                logger.error(
+                    f"Retry after orchestrator restart also failed: "
+                    f"{type(retry_error).__name__}: {retry_error}"
+                )
+                return self._create_all_failed_output(
+                    trajectory_ids,
+                    f"OrchestratorRetryFailure_{type(retry_error).__name__}"
+                )
 
         # Process results into TerminalBenchAgentOutput
         all_outputs: List[TerminalBenchAgentOutput] = []

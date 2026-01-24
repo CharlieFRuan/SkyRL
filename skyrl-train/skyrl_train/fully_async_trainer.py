@@ -321,6 +321,29 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """
         self.global_step = 0
 
+        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
+        # This must happen before any generate() calls
+        try:
+            await self.generator.startup()
+            logger.info("Generator startup complete")
+        except Exception as e:
+            logger.error(f"Generator startup failed: {e}")
+            raise
+
+        try:
+            await self._train_loop()
+        finally:
+            # Ensure generator cleanup happens even if training fails
+            try:
+                await self.generator.shutdown()
+                logger.info("Generator shutdown complete")
+            except Exception as e:
+                logger.warning(f"Generator shutdown error (non-fatal): {e}")
+
+    async def _train_loop(self):
+        """
+        Internal training loop, separated for proper generator lifecycle management.
+        """
         # Load checkpoint state if resumption is enabled. Also load the data UIDs that are already trained on.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
