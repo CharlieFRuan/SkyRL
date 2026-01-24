@@ -1,4 +1,5 @@
 import torch
+from difflib import SequenceMatcher
 from typing import List, Tuple, Union, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
@@ -7,6 +8,74 @@ from skyrl_train.inference_engines.base import ConversationType
 from omegaconf import DictConfig
 from loguru import logger
 from skyrl_gym.metrics import aggregate_for_environment
+
+
+def align_logprobs_with_lcs(
+    retokenized_ids: List[int],
+    vllm_token_logprobs: List[Dict[str, Any]],
+    tokenizer,
+) -> List[float]:
+    """Align vLLM logprobs to re-tokenized IDs using LCS on token strings.
+
+    When re-tokenizing vLLM output with a different tokenizer (e.g., for TIS training),
+    the token counts may differ slightly (off-by-one or more). This function uses
+    Longest Common Subsequence (LCS) matching on token strings to align the logprobs
+    from vLLM to the re-tokenized sequence.
+
+    Args:
+        retokenized_ids: Token IDs from re-tokenizing the response text
+        vllm_token_logprobs: List of dicts with "token" (str) and "logprob" (float)
+            from Harbor's rollout_details
+        tokenizer: HuggingFace tokenizer used for re-tokenization
+
+    Returns:
+        List of aligned logprobs, one per retokenized_id. Unmatched tokens get 0.0.
+
+    Example:
+        >>> # vLLM tokenized as ["Hello", " world", "!"] with logprobs [-0.1, -0.2, -0.3]
+        >>> # Re-tokenizer splits as ["Hello", " ", "world", "!"]
+        >>> vllm_logprobs = [
+        ...     {"token": "Hello", "logprob": -0.1},
+        ...     {"token": " world", "logprob": -0.2},
+        ...     {"token": "!", "logprob": -0.3}
+        ... ]
+        >>> retok_ids = tokenizer.encode("Hello world!")  # [1, 2, 3, 4]
+        >>> aligned = align_logprobs_with_lcs(retok_ids, vllm_logprobs, tokenizer)
+        >>> # Returns logprobs aligned to retokenized sequence via LCS matching
+    """
+    if not vllm_token_logprobs:
+        return [0.0] * len(retokenized_ids)
+
+    if not retokenized_ids:
+        return []
+
+    # Convert re-tokenized IDs to token strings for matching
+    retok_strings = tokenizer.convert_ids_to_tokens(retokenized_ids)
+
+    # Extract token strings and logprobs from vLLM output
+    vllm_strings = [tl["token"] for tl in vllm_token_logprobs]
+    vllm_logprobs = [tl["logprob"] for tl in vllm_token_logprobs]
+
+    # Use SequenceMatcher to find LCS alignment
+    matcher = SequenceMatcher(None, retok_strings, vllm_strings)
+    aligned = [0.0] * len(retokenized_ids)
+
+    # Get all matching blocks and assign logprobs
+    for a_start, b_start, size in matcher.get_matching_blocks():
+        for i in range(size):
+            aligned[a_start + i] = vllm_logprobs[b_start + i]
+
+    # Log alignment statistics for debugging
+    matched_count = sum(1 for lp in aligned if lp != 0.0)
+    if matched_count < len(retokenized_ids) * 0.9:  # Less than 90% matched
+        logger.debug(
+            f"LCS alignment: matched {matched_count}/{len(retokenized_ids)} tokens "
+            f"(vLLM had {len(vllm_token_logprobs)} tokens). "
+            f"First few retok: {retok_strings[:5]}, vLLM: {vllm_strings[:5]}"
+        )
+
+    return aligned
+
 
 CUSTOM_CHAT_TEMPLATES = {
     # chat template for qwen3 that preserves thinking tokens
@@ -398,15 +467,16 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
 
 def extract_logprobs_from_rollout_details(
     rollout_details: Optional[List[Dict[str, Any]]],
-) -> Optional[List[List[float]]]:
+) -> Optional[List[List[Dict[str, Any]]]]:
     """
-    Extract per-turn logprobs from Harbor's rollout_details structure.
+    Extract per-turn logprobs (with token strings) from Harbor's rollout_details structure.
 
     Harbor stores rollout details as a list of RolloutDetail dicts. Each RolloutDetail
     contains per-turn data for a conversation trajectory:
         - prompt_token_ids: list[list[int]] - prompt tokens per turn
         - completion_token_ids: list[list[int]] - completion tokens per turn
-        - logprobs: list[list[float]] - logprobs per turn (one list per assistant turn)
+        - logprobs: list[list[dict]] - logprobs per turn, where each dict has
+            {"token": str, "logprob": float} for LCS alignment
 
     For agents with subagents or summarization, multiple RolloutDetail objects may exist.
     By convention, the first RolloutDetail contains the main agent's conversation.
@@ -416,8 +486,9 @@ def extract_logprobs_from_rollout_details(
             Can be None or empty if rollout details weren't collected.
 
     Returns:
-        Per-turn logprobs in format [[logprobs_turn1], [logprobs_turn2], ...],
+        Per-turn logprobs in format [[{token, logprob}_turn1], [{token, logprob}_turn2], ...],
         or None if rollout_details is empty/missing or doesn't contain logprobs.
+        Each inner dict has "token" (str) and "logprob" (float) keys.
 
     Example:
         >>> rollout_details = result.agent_result.rollout_details
@@ -454,6 +525,20 @@ def extract_logprobs_from_rollout_details(
         )
         return None
 
+    # Validate the inner structure contains dicts with token+logprob (new format)
+    # or just floats (legacy format - handle gracefully)
+    if len(logprobs) > 0 and len(logprobs[0]) > 0:
+        first_item = logprobs[0][0]
+        if isinstance(first_item, (int, float)):
+            # Legacy format: list[list[float]] - convert to new format without token strings
+            # This allows backward compatibility but LCS alignment won't work
+            logger.warning(
+                "Detected legacy logprobs format (list[list[float]]). "
+                "Token strings not available, LCS alignment will be disabled. "
+                "Update Harbor to get token strings for proper TIS support."
+            )
+            return None  # Return None to disable logprobs for legacy format
+
     logger.debug(f"Extracted logprobs from rollout_details: {len(logprobs)} turns")
     return logprobs
 
@@ -465,12 +550,17 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
     We encode each message one by one, using a fixed base approach, building response token IDs, loss mask,
     and rollout logprobs if provided. For Qwen3, this function will keep all the thinking tokens from the messages.
 
+    When assistant_logprobs contains token strings (new format from Harbor), this function uses LCS
+    (Longest Common Subsequence) alignment to handle tokenization mismatches between vLLM and the
+    training tokenizer. This solves the off-by-one problem in TIS (Truncated Importance Sampling).
+
     Args:
         messages: List of message dicts with 'role' and 'content' keys. Must contain at least
                  one message.
         tokenizer: HuggingFace tokenizer with chat_template support and eos_token_id defined.
-        assistant_logprobs: Optional list of logprobs for each assistant message. In the format of
-                `[[logprobs for assistant msg 1], [logprobs for assistant msg 2], ...]`.
+        assistant_logprobs: Optional list of logprobs for each assistant message. Supports two formats:
+            - New format (with token strings): [[{"token": str, "logprob": float}, ...], ...]
+            - Legacy format (floats only): [[float, ...], ...] - will trigger a warning
         custom_chat_template: Optional custom chat template string to use instead of tokenizer's default.
 
     Returns:
@@ -547,16 +637,41 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
                     )
                 else:
                     candidate_logprobs = assistant_logprobs[assistant_msg_idx]
-                    if len(candidate_logprobs) != len(generated_token_ids):
-                        logger.warning(
-                            "Logprob count ({}) does not match token count ({}) for assistant message #{}. "
-                            "Proceeding with zeroed logprobs.",
-                            len(candidate_logprobs),
-                            len(generated_token_ids),
-                            assistant_msg_idx + 1,
+
+                    # Check if we have the new format with token strings (for LCS alignment)
+                    has_token_strings = (
+                        len(candidate_logprobs) > 0
+                        and isinstance(candidate_logprobs[0], dict)
+                        and "token" in candidate_logprobs[0]
+                    )
+
+                    if has_token_strings:
+                        # New format: use LCS alignment to handle tokenization mismatches
+                        msg_logprobs = align_logprobs_with_lcs(
+                            generated_token_ids,
+                            candidate_logprobs,
+                            tokenizer
+                        )
+                        logger.debug(
+                            f"LCS aligned logprobs for assistant message #{assistant_msg_idx + 1}: "
+                            f"vLLM tokens={len(candidate_logprobs)}, retokenized={len(generated_token_ids)}"
                         )
                     else:
-                        msg_logprobs = candidate_logprobs
+                        # Legacy format: simple count-based matching (may fail on off-by-one)
+                        if isinstance(candidate_logprobs[0], dict):
+                            # Dict format but missing token strings - extract just logprobs
+                            candidate_logprobs = [lp.get("logprob", 0.0) for lp in candidate_logprobs]
+
+                        if len(candidate_logprobs) != len(generated_token_ids):
+                            logger.warning(
+                                "Logprob count ({}) does not match token count ({}) for assistant message #{}. "
+                                "Token strings not available for LCS alignment. Proceeding with zeroed logprobs.",
+                                len(candidate_logprobs),
+                                len(generated_token_ids),
+                                assistant_msg_idx + 1,
+                            )
+                        else:
+                            msg_logprobs = candidate_logprobs
 
                 rollout_logprobs.extend(msg_logprobs if msg_logprobs is not None else [0.0] * len(generated_token_ids))
 
