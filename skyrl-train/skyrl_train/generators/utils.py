@@ -396,6 +396,68 @@ def encode_messages_subset(messages: ConversationType, tokenizer, custom_chat_te
     return conversation_token_ids
 
 
+def extract_logprobs_from_rollout_details(
+    rollout_details: Optional[List[Dict[str, Any]]],
+) -> Optional[List[List[float]]]:
+    """
+    Extract per-turn logprobs from Harbor's rollout_details structure.
+
+    Harbor stores rollout details as a list of RolloutDetail dicts. Each RolloutDetail
+    contains per-turn data for a conversation trajectory:
+        - prompt_token_ids: list[list[int]] - prompt tokens per turn
+        - completion_token_ids: list[list[int]] - completion tokens per turn
+        - logprobs: list[list[float]] - logprobs per turn (one list per assistant turn)
+
+    For agents with subagents or summarization, multiple RolloutDetail objects may exist.
+    By convention, the first RolloutDetail contains the main agent's conversation.
+
+    Args:
+        rollout_details: List of RolloutDetail dicts from Harbor's AgentContext.
+            Can be None or empty if rollout details weren't collected.
+
+    Returns:
+        Per-turn logprobs in format [[logprobs_turn1], [logprobs_turn2], ...],
+        or None if rollout_details is empty/missing or doesn't contain logprobs.
+
+    Example:
+        >>> rollout_details = result.agent_result.rollout_details
+        >>> assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
+        >>> if assistant_logprobs:
+        ...     response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
+        ...         messages, tokenizer, assistant_logprobs
+        ...     )
+    """
+    if not rollout_details or len(rollout_details) == 0:
+        return None
+
+    # First rollout_detail contains the main agent's conversation
+    main_rollout = rollout_details[0]
+
+    # Handle both dict and object-like access patterns
+    if isinstance(main_rollout, dict):
+        logprobs = main_rollout.get("logprobs")
+    else:
+        logprobs = getattr(main_rollout, "logprobs", None)
+
+    if not logprobs:
+        return None
+
+    # Validate structure: should be list of lists
+    if not isinstance(logprobs, list):
+        logger.warning(f"Unexpected logprobs type: {type(logprobs)}, expected list")
+        return None
+
+    if len(logprobs) > 0 and not isinstance(logprobs[0], list):
+        logger.warning(
+            f"Unexpected logprobs[0] type: {type(logprobs[0])}, expected list. "
+            f"rollout_details may have unexpected structure."
+        )
+        return None
+
+    logger.debug(f"Extracted logprobs from rollout_details: {len(logprobs)} turns")
+    return logprobs
+
+
 def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tokenizer, assistant_logprobs=None, custom_chat_template=None):
     """
     Get the response ids and loss mask from a list of messages.

@@ -5,7 +5,11 @@ from typing import List, Optional, Dict, Any, Set
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
-from skyrl_train.generators.utils import get_rollout_metrics, get_response_ids_and_loss_mask_from_messages
+from skyrl_train.generators.utils import (
+    get_rollout_metrics,
+    get_response_ids_and_loss_mask_from_messages,
+    extract_logprobs_from_rollout_details,
+)
 from skyrl_train.inference_engines.inference_engine_client import InferenceEngineClient
 from skyrl_train.inference_engines.base import ConversationType
 from skyrl_train.utils.reward_shaping import shape_reward_from_output
@@ -654,7 +658,11 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Process response messages (everything after the first message)
         response_messages = chat_history[1:]
-        assistant_logprobs = getattr(result.agent_result, "output_logprobs", None)
+
+        # Extract per-turn logprobs from Harbor's rollout_details (required for TIS)
+        rollout_details = getattr(result.agent_result, "rollout_details", None)
+        assistant_logprobs = extract_logprobs_from_rollout_details(rollout_details)
+
         response_ids, loss_mask, rollout_logprobs = get_response_ids_and_loss_mask_from_messages(
             response_messages, self.tokenizer, assistant_logprobs, custom_chat_template=self.custom_chat_template_content
         )
