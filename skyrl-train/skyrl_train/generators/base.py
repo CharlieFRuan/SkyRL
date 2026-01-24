@@ -41,6 +41,10 @@ class GeneratorOutput(TypedDict):
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # For RLOO-N: exclude sample from baseline computation (e.g., infrastructure failures)
+    # When True, the sample is masked from loss AND excluded from group baseline calculation.
+    # This allows distinguishing infrastructure failures (exclude) from agent failures (include with zero reward).
+    exclude_from_baseline: Optional[List[bool]]
 
 
 class GeneratorInterface(ABC):

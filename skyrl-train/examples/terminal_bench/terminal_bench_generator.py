@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Set
 from loguru import logger
 from uuid import uuid4
 from skyrl_train.generators.base import GeneratorInterface, GeneratorInput, GeneratorOutput, TrajectoryID
@@ -30,6 +30,11 @@ class TerminalBenchAgentOutput:
     trajectory_id: TrajectoryID
     summarization_count: Optional[int] = None
     rollout_logprobs: Optional[List[float]] = None
+    # For RLOO-N: True = exclude from baseline (infrastructure failure)
+    # False = include in baseline (agent failure or success)
+    exclude_from_baseline: bool = False
+    # Store the exception type for debugging/logging
+    exception_type: Optional[str] = None
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -74,6 +79,9 @@ class TerminalBenchGenerator(GeneratorInterface):
         # Reward shaping config (parses test output for partial credit)
         self._reward_shaping_config = self._harbor_config_builder.get_reward_shaping_config()
 
+        # Error handling config (for RLOO-N advantage estimator)
+        self._error_handling_config = self._harbor_config_builder.get_error_handling_config()
+
         logger.info(
             f"TerminalBenchGenerator initialized with HarborConfigBuilder. "
             f"Exposed fields: {list(self._harbor_config_builder._harbor_cfg.keys())}. "
@@ -81,7 +89,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             f"backoff={self._retry_config.min_wait_sec}-{self._retry_config.max_wait_sec}s. "
             f"Concurrent trials: {self._n_concurrent_trials}. "
             f"Reward shaping: enabled={self._reward_shaping_config.get('enable_reward_shaping', True)}, "
-            f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}"
+            f"shaper={self._reward_shaping_config.get('reward_shaper', 'pass_ratio')}. "
+            f"Error classification: enabled={self._error_handling_config.get('enable_error_classification', False)}"
         )
 
         # Read custom chat template
@@ -189,25 +198,56 @@ class TerminalBenchGenerator(GeneratorInterface):
             output = self._process_trial_result(result, trajectory_id)
             all_outputs.append(output)
 
-        # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt), if one
-        # of the trajectories fails, we skip the entire group. We also skip the group for rollout metric aggregation
+        # For a group of trajectories (n_samples_per_prompt trajectories for the same prompt):
+        # - If error classification is DISABLED: if ANY trajectory fails, zero ALL trajectories in the group
+        # - If error classification is ENABLED (RLOO-N mode):
+        #   - Infrastructure failures (exclude_from_baseline=True): mark for exclusion from baseline
+        #   - Agent failures (exclude_from_baseline=False): include in baseline with reward=0
+        #   - If ALL trajectories in a group fail, they all get excluded from baseline
+        enable_error_classification = self._error_handling_config.get("enable_error_classification", False)
+
         failed_instance_ids = set()
         num_failed_trajectories = 0  # per-trajectory, rather than per-instance
+        num_masked_trajectories = 0  # trajectories excluded from baseline
         successful_outputs: List[TerminalBenchAgentOutput] = []  # only for metrics purpose
+
+        # Track failure types per instance for RLOO-N
+        instance_has_infra_failure: Dict[str, bool] = {}
+        instance_has_agent_failure: Dict[str, bool] = {}
+
         for output in all_outputs:
             if output.stop_reason == "error":
                 failed_instance_ids.add(output.trajectory_id.instance_id)
                 num_failed_trajectories += 1
+                if output.exclude_from_baseline:
+                    num_masked_trajectories += 1
+                    instance_has_infra_failure[output.trajectory_id.instance_id] = True
+                else:
+                    instance_has_agent_failure[output.trajectory_id.instance_id] = True
 
-        for output in all_outputs:
-            if output.trajectory_id.instance_id in failed_instance_ids:
-                output.response_ids = [0]
-                output.stop_reason = "error"
-                output.loss_mask = [0]
-                output.prompt_ids = [0]
-                output.reward = 0
-            else:
-                successful_outputs.append(output)
+        if enable_error_classification:
+            # RLOO-N mode: preserve exclude_from_baseline flags, don't cascade failures
+            for output in all_outputs:
+                if output.stop_reason == "error":
+                    # Error outputs already have correct exclude_from_baseline set
+                    output.response_ids = [0]
+                    output.loss_mask = [0]
+                    output.prompt_ids = [0]
+                    output.reward = 0
+                else:
+                    successful_outputs.append(output)
+        else:
+            # Legacy mode: if any trajectory fails, zero entire group
+            for output in all_outputs:
+                if output.trajectory_id.instance_id in failed_instance_ids:
+                    output.response_ids = [0]
+                    output.stop_reason = "error"
+                    output.loss_mask = [0]
+                    output.prompt_ids = [0]
+                    output.reward = 0
+                    output.exclude_from_baseline = False  # Legacy: include in baseline
+                else:
+                    successful_outputs.append(output)
 
         # Calculate rollout metrics for successful outputs
         if len(successful_outputs) > 0:
@@ -221,10 +261,22 @@ class TerminalBenchGenerator(GeneratorInterface):
             rollout_metrics = {}
         rollout_metrics["generate/num_failed_instances"] = len(failed_instance_ids)
         rollout_metrics["generate/num_failed_trajectories"] = num_failed_trajectories
+        rollout_metrics["generate/num_masked_trajectories"] = num_masked_trajectories
+
+        # Log exception type breakdown for debugging
+        exception_counts: Dict[str, int] = {}
+        for output in all_outputs:
+            if output.exception_type:
+                exception_counts[output.exception_type] = exception_counts.get(output.exception_type, 0) + 1
+        if exception_counts:
+            logger.info(f"Exception breakdown: {exception_counts}")
+            for exc_type, count in exception_counts.items():
+                rollout_metrics[f"generate/exception_{exc_type}"] = count
 
         logger.info(
             f"Batch generation complete: {num_trials - num_failed_trajectories}/{num_trials} successful, "
-            f"{len(failed_instance_ids)} failed instances"
+            f"{len(failed_instance_ids)} failed instances, "
+            f"{num_masked_trajectories} masked (excluded from baseline)"
         )
 
         generator_output: GeneratorOutput = {
@@ -235,9 +287,50 @@ class TerminalBenchGenerator(GeneratorInterface):
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
             "rollout_logprobs": None,
+            "exclude_from_baseline": [output.exclude_from_baseline for output in all_outputs],
         }
 
         return generator_output
+
+    def _classify_exception(self, exception: Exception) -> tuple[bool, str]:
+        """
+        Classify an exception as infrastructure failure (mask) or agent failure (zero).
+
+        Args:
+            exception: The exception to classify.
+
+        Returns:
+            Tuple of (exclude_from_baseline, exception_type_name)
+            - exclude_from_baseline=True: Infrastructure failure, exclude from RLOO-N baseline
+            - exclude_from_baseline=False: Agent failure, include in baseline with reward=0
+        """
+        exception_type = type(exception).__name__
+
+        # If error classification is disabled, treat all errors as agent failures
+        if not self._error_handling_config.get("enable_error_classification", False):
+            return False, exception_type
+
+        mask_exceptions = self._error_handling_config.get("mask_exceptions", set())
+        zero_exceptions = self._error_handling_config.get("zero_exceptions", set())
+        default_treatment = self._error_handling_config.get("default_error_treatment", "zero")
+
+        # Check if this exception type should be masked (excluded from baseline)
+        if exception_type in mask_exceptions:
+            logger.debug(f"Exception {exception_type} classified as MASK (infrastructure failure)")
+            return True, exception_type
+
+        # Check if this exception type should be zeroed (included in baseline)
+        if exception_type in zero_exceptions:
+            logger.debug(f"Exception {exception_type} classified as ZERO (agent failure)")
+            return False, exception_type
+
+        # Default treatment for unclassified exceptions
+        exclude = (default_treatment == "mask")
+        logger.debug(
+            f"Exception {exception_type} not in config, using default treatment: "
+            f"{'MASK' if exclude else 'ZERO'}"
+        )
+        return exclude, exception_type
 
     def _process_trial_result(
         self,
@@ -256,7 +349,11 @@ class TerminalBenchGenerator(GeneratorInterface):
         """
         # Handle exceptions from the orchestrator
         if isinstance(result, Exception):
-            logger.warning(f"Trajectory {trajectory_id} failed with exception: {result}")
+            exclude_from_baseline, exception_type = self._classify_exception(result)
+            logger.warning(
+                f"Trajectory {trajectory_id} failed with exception: {result} "
+                f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
+            )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
                 reward=0,
@@ -264,13 +361,34 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask=[0],
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
+                exclude_from_baseline=exclude_from_baseline,
+                exception_type=exception_type,
             )
 
         # Check for missing verifier result (trial ran but didn't produce valid output)
         if not result.verifier_result:
+            # Try to get exception info from the result
+            exception_info = getattr(result, "exception_info", None)
+            exception_type = "UnknownError"
+            exclude_from_baseline = False
+
+            if exception_info:
+                # Extract exception type from exception_info if available
+                if hasattr(exception_info, "exception_type"):
+                    exception_type = exception_info.exception_type
+                elif hasattr(exception_info, "__class__"):
+                    exception_type = type(exception_info).__name__
+
+                # Create a mock exception to classify
+                class MockException(Exception):
+                    pass
+                MockException.__name__ = exception_type
+                exclude_from_baseline, _ = self._classify_exception(MockException())
+
             logger.warning(
                 f"Trajectory {trajectory_id} failed: No verifier result. "
-                f"Exception info: {result.exception_info}"
+                f"Exception info: {exception_info} "
+                f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
             )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
@@ -279,6 +397,8 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask=[0],
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
+                exclude_from_baseline=exclude_from_baseline,
+                exception_type=exception_type,
             )
 
         # Extract data from successful trial
@@ -287,9 +407,13 @@ class TerminalBenchGenerator(GeneratorInterface):
             chat_history = result.agent_result.metadata['all_messages']
             summarization_count = result.agent_result.metadata['summarization_count']
         except (KeyError, AttributeError, TypeError) as e:
+            # Data extraction failure is typically an infrastructure issue
+            exception_type = type(e).__name__
+            exclude_from_baseline, _ = self._classify_exception(e)
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Could not extract results. "
-                f"Error: {e}, Result: {result}"
+                f"Error: {e}, Result: {result} "
+                f"(type={exception_type}, exclude_from_baseline={exclude_from_baseline})"
             )
             return TerminalBenchAgentOutput(
                 response_ids=[0],
@@ -298,6 +422,8 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask=[0],
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
+                exclude_from_baseline=exclude_from_baseline,
+                exception_type=exception_type,
             )
 
         # Apply reward shaping if enabled
@@ -320,6 +446,7 @@ class TerminalBenchGenerator(GeneratorInterface):
 
         # Validate chat history structure
         if not chat_history or len(chat_history) < 2 or chat_history[0]["role"] != "user":
+            # Invalid chat history is typically an infrastructure/serialization issue
             logger.warning(
                 f"Trajectory {trajectory_id} failed: Invalid chat history structure. "
                 f"chat_history: {chat_history}"
@@ -331,6 +458,8 @@ class TerminalBenchGenerator(GeneratorInterface):
                 loss_mask=[0],
                 prompt_ids=[0],
                 trajectory_id=trajectory_id,
+                exclude_from_baseline=True,  # Infrastructure issue
+                exception_type="InvalidChatHistory",
             )
 
         # Process successful trial

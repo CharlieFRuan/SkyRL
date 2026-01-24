@@ -581,6 +581,11 @@ class RayPPOTrainer:
             },
         )
         training_input.metadata = {"uids": uids}
+        # For RLOO-N: pass through exclude_from_baseline flags if present
+        if generator_output.get("exclude_from_baseline") is not None:
+            training_input.metadata["exclude_from_baseline"] = np.array(
+                generator_output["exclude_from_baseline"], dtype=bool
+            )
         # padded response length
         training_input.metadata["response_length"] = response_masks_tensor.shape[1]
         if self.cfg.trainer.step_wise_training:
@@ -740,6 +745,8 @@ class RayPPOTrainer:
             advantages = last_step_advantages[traj_ids]
             returns = last_step_returns[traj_ids]
         else:
+            # For RLOO-N: pass exclude_from_baseline if present in metadata
+            exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)
             advantages, returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=token_level_rewards,
                 response_mask=data["response_mask"],
@@ -750,6 +757,7 @@ class RayPPOTrainer:
                 gamma=self.cfg.trainer.algorithm.gamma,
                 lambd=self.cfg.trainer.algorithm.lambd,
                 grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
+                exclude_from_baseline=exclude_from_baseline,
             )
         data["returns"] = returns
         data["advantages"] = advantages

@@ -173,6 +173,40 @@ REWARD_SHAPING_SCHEMA = SectionSchema(
     }
 )
 
+# Error handling config fields (for RLOO-N advantage estimator)
+# Controls how different failure types are treated:
+# - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
+# - "zero" exceptions: Included in baseline with reward=0 (agent failures)
+#
+# Default classification:
+# - Infrastructure failures (mask): DaytonaError, NetworkError, EnvironmentStartTimeoutError
+# - Agent failures (zero): AgentTimeoutError, ContextLengthExceededError
+# - Ambiguous (configurable): VerifierTimeoutError, RewardFileNotFoundError
+ERROR_HANDLING_SCHEMA = SectionSchema(
+    fields={
+        # Enable RLOO-N style error handling (exclude infrastructure failures from baseline)
+        "enable_error_classification": FieldMapping("enable_error_classification", default=False),
+        # Exceptions to mask (exclude from baseline, no gradient contribution)
+        # These are treated as "neutral" - infrastructure issues, not agent failures
+        "mask_exceptions": FieldMapping("mask_exceptions", default=[
+            "DaytonaError",
+            "EnvironmentStartTimeoutError",
+            "NetworkError",
+            "ConnectionError",
+            "RewardFileNotFoundError",
+            "RewardFileEmptyError",
+        ]),
+        # Exceptions to zero (include in baseline with reward=0)
+        # These are treated as agent failures - the model should learn to avoid them
+        "zero_exceptions": FieldMapping("zero_exceptions", default=[
+            "AgentTimeoutError",
+            "ContextLengthExceededError",
+        ]),
+        # Default treatment for unclassified exceptions ("mask" or "zero")
+        "default_error_treatment": FieldMapping("default_error_treatment", default="zero"),
+    }
+)
+
 # Complete schema registry
 HARBOR_SCHEMA = {
     "agent": AGENT_SCHEMA,
@@ -183,6 +217,7 @@ HARBOR_SCHEMA = {
     "orchestrator": ORCHESTRATOR_SCHEMA,
     "logging": LOGGING_SCHEMA,
     "reward_shaping": REWARD_SHAPING_SCHEMA,
+    "error_handling": ERROR_HANDLING_SCHEMA,
 }
 
 
@@ -460,6 +495,36 @@ class HarborConfigBuilder:
             if value is not None:
                 return str(value).upper()
         return default
+
+    def get_error_handling_config(self) -> Dict[str, Any]:
+        """
+        Get error handling configuration for RLOO-N advantage estimator.
+
+        This controls how different exception types are treated:
+        - "mask" exceptions: Excluded from baseline (neutral - infrastructure failures)
+        - "zero" exceptions: Included in baseline with reward=0 (agent failures)
+
+        Returns:
+            Dict with keys:
+                - enable_error_classification: bool - whether to classify errors
+                - mask_exceptions: Set[str] - exception names to mask (exclude from baseline)
+                - zero_exceptions: Set[str] - exception names to zero (include with reward=0)
+                - default_error_treatment: str - "mask" or "zero" for unclassified errors
+        """
+        config = {}
+
+        for yaml_key, mapping in ERROR_HANDLING_SCHEMA.fields.items():
+            value = self._get_field_value(yaml_key, mapping, self._cfg)
+            if value is not None:
+                # Convert lists to sets for faster lookup
+                if yaml_key in ("mask_exceptions", "zero_exceptions"):
+                    if isinstance(value, (list, tuple)):
+                        value = set(value)
+                    elif isinstance(value, str):
+                        value = {s.strip() for s in value.split(",") if s.strip()}
+                config[yaml_key] = value
+
+        return config
 
     def build_trial_config(
         self,
