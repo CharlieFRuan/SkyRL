@@ -236,10 +236,23 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
-    if any(has_rollout_logprobs) and not all(has_rollout_logprobs):
-        raise ValueError(
-            "generator outputs are expected to all have null rollout_logprobs or all non-null, but received a mix"
-        )
+    any_has_logprobs = any(has_rollout_logprobs)
+
+    # Handle mixed rollout_logprobs: if some batches have logprobs and others don't,
+    # fill in placeholder [0.0] values for the batches that don't have them.
+    # This can happen when all trials in a batch fail (returns None) while other batches succeed.
+    rollout_logprobs_concat = None
+    if any_has_logprobs:
+        rollout_logprobs_concat = []
+        for output in generator_outputs:
+            if output.get("rollout_logprobs") is not None:
+                rollout_logprobs_concat.extend(output["rollout_logprobs"])
+            else:
+                # Fill in placeholder logprobs for batches that don't have them
+                # Each trajectory needs logprobs matching its response_ids length
+                for response_ids in output["response_ids"]:
+                    rollout_logprobs_concat.append([0.0] * len(response_ids))
+
     result: GeneratorOutput = {
         "prompt_token_ids": sum([output["prompt_token_ids"] for output in generator_outputs], []),
         "response_ids": sum([output["response_ids"] for output in generator_outputs], []),
@@ -250,11 +263,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
             if "stop_reasons" in generator_outputs[0] and generator_outputs[0]["stop_reasons"] is not None
             else None
         ),
-        "rollout_logprobs": (
-            sum([output["rollout_logprobs"] for output in generator_outputs], [])
-            if generator_outputs[0]["rollout_logprobs"] is not None
-            else None
-        ),
+        "rollout_logprobs": rollout_logprobs_concat,
     }
 
     # propagate additional keys with list values as-is
