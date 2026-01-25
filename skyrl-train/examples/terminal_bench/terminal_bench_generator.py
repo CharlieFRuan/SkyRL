@@ -417,6 +417,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.loss_mask = [0]
                     output.prompt_ids = [0]
                     output.reward = 0
+                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
                 else:
                     successful_outputs.append(output)
         else:
@@ -428,6 +429,7 @@ class TerminalBenchGenerator(GeneratorInterface):
                     output.loss_mask = [0]
                     output.prompt_ids = [0]
                     output.reward = 0
+                    output.rollout_logprobs = None  # Clear logprobs to match response_ids length
                     output.exclude_from_baseline = False  # Legacy: include in baseline
                 else:
                     successful_outputs.append(output)
@@ -463,13 +465,18 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Collect rollout_logprobs if any outputs have them (required for TIS)
+        # For zeroed/failed trajectories (response_ids=[0]), use [0.0] to match length
         has_any_logprobs = any(output.rollout_logprobs is not None for output in all_outputs)
         rollout_logprobs_list = None
         if has_any_logprobs:
-            rollout_logprobs_list = [
-                output.rollout_logprobs if output.rollout_logprobs is not None else []
-                for output in all_outputs
-            ]
+            rollout_logprobs_list = []
+            for output in all_outputs:
+                if output.rollout_logprobs is not None:
+                    rollout_logprobs_list.append(output.rollout_logprobs)
+                else:
+                    # For zeroed trajectories, logprobs must match response_ids length
+                    # response_ids is [0] (length 1), so logprobs should be [0.0]
+                    rollout_logprobs_list.append([0.0] * len(output.response_ids))
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
