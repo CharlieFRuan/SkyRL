@@ -462,6 +462,15 @@ class TerminalBenchGenerator(GeneratorInterface):
             f"{num_masked_trajectories} masked (excluded from baseline)"
         )
 
+        # Collect rollout_logprobs if any outputs have them (required for TIS)
+        has_any_logprobs = any(output.rollout_logprobs is not None for output in all_outputs)
+        rollout_logprobs_list = None
+        if has_any_logprobs:
+            rollout_logprobs_list = [
+                output.rollout_logprobs if output.rollout_logprobs is not None else []
+                for output in all_outputs
+            ]
+
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
             "response_ids": [output.response_ids for output in all_outputs],
@@ -469,7 +478,7 @@ class TerminalBenchGenerator(GeneratorInterface):
             "loss_masks": [output.loss_mask for output in all_outputs],
             "stop_reasons": [output.stop_reason for output in all_outputs],
             "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
+            "rollout_logprobs": rollout_logprobs_list,
             "exclude_from_baseline": [output.exclude_from_baseline for output in all_outputs],
         }
 
