@@ -98,6 +98,16 @@ AGENT_SCHEMA = SectionSchema(
     }
 )
 
+# Eval-specific config fields
+# These settings override the standard settings during evaluation
+EVAL_SCHEMA = SectionSchema(
+    fields={
+        # Timeout override for eval (default 900s = 15 minutes)
+        # Eval tasks may need more time than training since we don't retry
+        "eval_timeout_override_sec": FieldMapping("eval_timeout_override_sec", default=900),
+    }
+)
+
 # Environment config fields
 ENVIRONMENT_SCHEMA = SectionSchema(
     fields={
@@ -218,6 +228,7 @@ HARBOR_SCHEMA = {
     "logging": LOGGING_SCHEMA,
     "reward_shaping": REWARD_SHAPING_SCHEMA,
     "error_handling": ERROR_HANDLING_SCHEMA,
+    "eval": EVAL_SCHEMA,
 }
 
 
@@ -526,6 +537,26 @@ class HarborConfigBuilder:
 
         return config
 
+    def get_eval_timeout_override_sec(self, default: int = 900) -> int:
+        """
+        Get the timeout override for evaluation runs.
+
+        Eval tasks may need more time than training since they don't benefit
+        from retry logic the same way. Default is 900 seconds (15 minutes).
+
+        Args:
+            default: Default timeout if not specified in config.
+
+        Returns:
+            Timeout in seconds for eval runs.
+        """
+        mapping = EVAL_SCHEMA.fields.get("eval_timeout_override_sec")
+        if mapping:
+            value = self._get_field_value("eval_timeout_override_sec", mapping, self._cfg)
+            if value is not None:
+                return int(value)
+        return default
+
     def build_trial_config(
         self,
         task_path: str,
@@ -533,6 +564,7 @@ class HarborConfigBuilder:
         model_name: str,
         api_base: str,
         session_id: str,
+        timeout_override_sec: Optional[int] = None,
     ) -> TrialConfig:
         """
         Build a complete TrialConfig for a Harbor trial.
@@ -543,6 +575,9 @@ class HarborConfigBuilder:
             model_name: Model name for Harbor (e.g., "hosted_vllm/Qwen3-8B").
             api_base: Base URL for the inference API.
             session_id: Session ID for sticky routing.
+            timeout_override_sec: Optional timeout override in seconds.
+                If provided, overrides the default override_timeout_sec from config.
+                Useful for eval runs that may need different timeouts.
 
         Returns:
             Configured TrialConfig ready for Trial execution.
@@ -564,6 +599,10 @@ class HarborConfigBuilder:
         # Get agent name from harbor config (defaults to "terminus-2")
         # This is the Harbor AgentName value directly (e.g., "terminus-2", "oracle")
         agent_name = agent_direct_fields.pop("name", "terminus-2")
+
+        # Apply timeout override if provided (e.g., for eval runs)
+        if timeout_override_sec is not None:
+            agent_direct_fields["override_timeout_sec"] = timeout_override_sec
 
         # Build AgentConfig
         agent_config = AgentConfig(

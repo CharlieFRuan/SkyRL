@@ -118,6 +118,17 @@ class TerminalBenchGenerator(GeneratorInterface):
         self._orchestrator_started: bool = False
         self._orchestrator_restart_count: int = 0
 
+        # Eval session state (separate orchestrator for eval runs)
+        # Each eval run gets a fresh orchestrator that is destroyed after the eval completes
+        self._eval_orchestrator: Optional[QueueOrchestrator] = None
+        self._eval_orchestrator_lock: Optional[asyncio.Lock] = None
+        self._eval_session_active: bool = False
+        self._eval_session_name: Optional[str] = None
+        self._eval_trials_dir: Optional[str] = None
+
+        # Eval-specific timeout (default 900s = 15 minutes)
+        self._eval_timeout_override_sec = self._harbor_config_builder.get_eval_timeout_override_sec(default=900)
+
     def _configure_harbor_logging(self, level: str) -> None:
         """
         Configure Harbor's logging level.
@@ -250,6 +261,124 @@ class TerminalBenchGenerator(GeneratorInterface):
                     self._orchestrator_started = False
                     self._orchestrator = None
 
+    async def start_eval_session(
+        self,
+        run_name: str,
+        eval_step: int,
+        val_set_name: Optional[str] = None,
+    ) -> None:
+        """Start a fresh eval session with its own QueueOrchestrator.
+
+        Each eval run gets a dedicated orchestrator that is destroyed after eval completes.
+        This ensures eval trials don't interfere with training trials and provides
+        clean isolation for metrics and artifacts.
+
+        Args:
+            run_name: The job run name (from cfg.trainer.run_name).
+            eval_step: The current global step (for unique naming).
+            val_set_name: Optional name of the validation set being evaluated.
+        """
+        if self._eval_orchestrator_lock is None:
+            self._eval_orchestrator_lock = asyncio.Lock()
+
+        async with self._eval_orchestrator_lock:
+            # Ensure any previous eval session is cleaned up
+            if self._eval_session_active and self._eval_orchestrator is not None:
+                logger.warning("Previous eval session still active, shutting it down first")
+                try:
+                    await self._eval_orchestrator.shutdown(wait=True)
+                except Exception as e:
+                    logger.warning(f"Error shutting down previous eval orchestrator: {e}")
+                finally:
+                    self._eval_orchestrator = None
+                    self._eval_session_active = False
+
+            # Build unique session name
+            val_set_suffix = f"_{val_set_name}" if val_set_name else ""
+            self._eval_session_name = f"{run_name}_eval{val_set_suffix}_step{eval_step}"
+
+            # Create unique trials directory for this eval session
+            if self.trials_dir:
+                self._eval_trials_dir = str(Path(self.trials_dir) / "eval_sessions" / self._eval_session_name)
+                Path(self._eval_trials_dir).mkdir(parents=True, exist_ok=True)
+            else:
+                self._eval_trials_dir = self.trials_dir
+
+            logger.info(
+                f"Starting eval session: {self._eval_session_name} "
+                f"(timeout={self._eval_timeout_override_sec}s, trials_dir={self._eval_trials_dir})"
+            )
+
+            # Create fresh orchestrator for eval with eval-specific timeout
+            self._eval_orchestrator = QueueOrchestrator(
+                trial_configs=[],  # We submit dynamically via submit_batch()
+                n_concurrent_trials=self._n_concurrent_trials,
+                metrics={},  # SkyRL handles its own metrics
+                quiet=True,
+                retry_config=self._retry_config,
+            )
+            await self._eval_orchestrator.start()
+            self._eval_session_active = True
+
+            logger.info(
+                f"Eval session {self._eval_session_name} started with fresh QueueOrchestrator "
+                f"(n_concurrent_trials={self._n_concurrent_trials})"
+            )
+
+    async def stop_eval_session(self) -> None:
+        """Stop the current eval session and destroy its orchestrator.
+
+        Should be called after each evaluation run completes.
+        Safe to call multiple times (idempotent).
+        """
+        if self._eval_orchestrator_lock is None:
+            return
+
+        async with self._eval_orchestrator_lock:
+            if self._eval_orchestrator is not None and self._eval_session_active:
+                session_name = self._eval_session_name or "unknown"
+                try:
+                    logger.info(f"Stopping eval session: {session_name}")
+                    await self._eval_orchestrator.shutdown(wait=True)
+                    logger.info(f"Eval session {session_name} orchestrator shutdown complete")
+                except Exception as e:
+                    logger.warning(f"Error during eval orchestrator shutdown: {e}")
+                finally:
+                    self._eval_orchestrator = None
+                    self._eval_session_active = False
+                    self._eval_session_name = None
+                    self._eval_trials_dir = None
+
+    def _get_active_orchestrator(self) -> Optional[QueueOrchestrator]:
+        """Get the currently active orchestrator (eval or training).
+
+        Returns:
+            The eval orchestrator if an eval session is active, otherwise the training orchestrator.
+        """
+        if self._eval_session_active and self._eval_orchestrator is not None:
+            return self._eval_orchestrator
+        return self._orchestrator
+
+    def _get_active_trials_dir(self) -> Optional[str]:
+        """Get the trials directory for the currently active mode (eval or training).
+
+        Returns:
+            The eval trials directory if an eval session is active, otherwise the training trials_dir.
+        """
+        if self._eval_session_active and self._eval_trials_dir is not None:
+            return self._eval_trials_dir
+        return self.trials_dir
+
+    def _get_active_timeout_override(self) -> Optional[int]:
+        """Get the timeout override for the currently active mode (eval or training).
+
+        Returns:
+            The eval timeout if an eval session is active, otherwise None (use config default).
+        """
+        if self._eval_session_active:
+            return self._eval_timeout_override_sec
+        return None
+
     def _create_all_failed_output(
         self,
         trajectory_ids: List[TrajectoryID],
@@ -279,18 +408,27 @@ class TerminalBenchGenerator(GeneratorInterface):
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """
-        Generate rollouts for a batch of prompts using the shared QueueOrchestrator.
+        Generate rollouts for a batch of prompts using the active QueueOrchestrator.
 
-        The shared QueueOrchestrator (created in startup()) handles:
+        The active orchestrator (eval or training) handles:
         - Global concurrency control across all async workers
         - Retry logic with exponential backoff
         - Exception filtering (retry transient errors, skip permanent ones)
+
+        During eval sessions (started via start_eval_session()), uses a dedicated
+        eval orchestrator with its own trials directory and timeout settings.
 
         This method includes restart logic to recover from orchestrator failures
         without killing the entire training job.
         """
         num_trials = len(input_batch["prompts"])
-        logger.info(f"Starting batch generation for {num_trials} trials")
+        is_eval = self._eval_session_active
+        mode_str = f"eval ({self._eval_session_name})" if is_eval else "training"
+        logger.info(f"Starting batch generation for {num_trials} trials (mode={mode_str})")
+
+        # Get active trials directory and timeout override
+        active_trials_dir = self._get_active_trials_dir()
+        timeout_override = self._get_active_timeout_override()
 
         # Build all TrialConfigs upfront
         trial_configs: List[TrialConfig] = []
@@ -309,16 +447,23 @@ class TerminalBenchGenerator(GeneratorInterface):
 
             trial_config = self._harbor_config_builder.build_trial_config(
                 task_path=prompt,
-                trials_dir=self.trials_dir,
+                trials_dir=active_trials_dir,
                 model_name=f"hosted_vllm/{model_alias}",
                 api_base=f"{self.base_url}/v1",
                 session_id=session_id,
+                timeout_override_sec=timeout_override,
             )
             trial_configs.append(trial_config)
             trajectory_ids.append(trajectory_id)
 
-        # Check if orchestrator is available (startup() must have been called)
-        if not self._orchestrator_started or self._orchestrator is None:
+        # Get the active orchestrator (eval or training)
+        active_orchestrator = self._get_active_orchestrator()
+        orchestrator_started = (
+            self._eval_session_active if is_eval else self._orchestrator_started
+        )
+
+        # Check if orchestrator is available
+        if not orchestrator_started or active_orchestrator is None:
             logger.error(
                 "QueueOrchestrator not available. Was startup() called? "
                 "Attempting emergency restart..."
@@ -328,11 +473,11 @@ class TerminalBenchGenerator(GeneratorInterface):
                 logger.error("Emergency orchestrator restart failed. Returning all-failed output.")
                 return self._create_all_failed_output(trajectory_ids, "OrchestratorNotStarted")
 
-        # Submit trials to shared orchestrator with restart logic on failure
+        # Submit trials to active orchestrator with restart logic on failure
         results: List[TrialResult | Exception] = []
         try:
             # Submit all trials and collect futures
-            futures = await self._orchestrator.submit_batch(trial_configs)
+            futures = await active_orchestrator.submit_batch(trial_configs)
 
             # Wait for all trials to complete
             # Note: return_exceptions=True ensures individual trial failures don't
@@ -347,7 +492,15 @@ class TerminalBenchGenerator(GeneratorInterface):
                 f"{type(orchestrator_error).__name__}: {orchestrator_error}"
             )
 
-            # Attempt to restart the orchestrator
+            # For eval sessions, we don't retry - just fail
+            if is_eval:
+                logger.error("Eval session orchestrator failed. Returning all-failed output.")
+                return self._create_all_failed_output(
+                    trajectory_ids,
+                    f"EvalOrchestratorFailure_{type(orchestrator_error).__name__}"
+                )
+
+            # Attempt to restart the training orchestrator
             restart_success = await self._restart_orchestrator()
             if not restart_success:
                 logger.error(
@@ -362,7 +515,8 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Retry once with the fresh orchestrator
             try:
                 logger.info(f"Retrying batch of {num_trials} trials with restarted orchestrator")
-                futures = await self._orchestrator.submit_batch(trial_configs)
+                active_orchestrator = self._get_active_orchestrator()  # Refresh reference
+                futures = await active_orchestrator.submit_batch(trial_configs)
                 results = await asyncio.gather(*futures, return_exceptions=True)
             except Exception as retry_error:
                 logger.error(
