@@ -95,6 +95,11 @@ AGENT_SCHEMA = SectionSchema(
         # Rollout details collection (for TIS in async training)
         # When true, collects per-token logprobs needed for importance sampling correction
         "collect_rollout_details": FieldMapping("collect_rollout_details", field_type="kwargs", default=False),
+        # Strict JSON parser mode (for RL training)
+        # When true, treats parser warnings as errors and disables auto-correction.
+        # This prevents reward hacking where the model produces garbage output that the
+        # parser auto-corrects, allowing the model to get rewards despite malformed responses.
+        "strict_json_parser": FieldMapping("strict_json_parser", field_type="kwargs", default=False),
     }
 )
 
