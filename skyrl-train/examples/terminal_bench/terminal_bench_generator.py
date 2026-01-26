@@ -18,8 +18,10 @@ from pathlib import Path
 
 # Harbor orchestrator and trial imports
 from harbor.orchestrators.queue import QueueOrchestrator
+from harbor.orchestrators.base import OrchestratorEvent
 from harbor.models.trial.config import TrialConfig
 from harbor.models.trial.result import TrialResult
+from harbor.callbacks import create_rollback_hook
 
 # Schema-driven Harbor config mapping
 from examples.terminal_bench.harbor_config import HarborConfigBuilder
@@ -185,11 +187,24 @@ class TerminalBenchGenerator(GeneratorInterface):
             quiet=True,
             retry_config=self._retry_config,
         )
+
+        # Register rollback hook to ensure conversation consistency on exceptions.
+        # When a trial fails with ContextLengthExceededError or AgentTimeoutError,
+        # this hook rolls back rollout_details to the last complete turn, ensuring
+        # that any turn with a prompt has a matching response (and logprobs if collected).
+        rollback_hook = create_rollback_hook(
+            exception_types={"ContextLengthExceededError", "AgentTimeoutError"},
+            on_complete_failure="mark_metadata",
+            preserve_partial_logprobs=False,
+        )
+        self._orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, rollback_hook)
+
         await self._orchestrator.start()
         self._orchestrator_started = True
         logger.info(
             f"QueueOrchestrator created and started with "
-            f"n_concurrent_trials={self._n_concurrent_trials}"
+            f"n_concurrent_trials={self._n_concurrent_trials}, "
+            f"rollback_hook registered for ContextLengthExceededError/AgentTimeoutError"
         )
 
     async def _restart_orchestrator(self) -> bool:
@@ -317,12 +332,21 @@ class TerminalBenchGenerator(GeneratorInterface):
                 quiet=True,
                 retry_config=self._retry_config,
             )
+
+            # Register rollback hook for eval orchestrator (same as training)
+            rollback_hook = create_rollback_hook(
+                exception_types={"ContextLengthExceededError", "AgentTimeoutError"},
+                on_complete_failure="mark_metadata",
+                preserve_partial_logprobs=False,
+            )
+            self._eval_orchestrator.add_hook(OrchestratorEvent.TRIAL_COMPLETED, rollback_hook)
+
             await self._eval_orchestrator.start()
             self._eval_session_active = True
 
             logger.info(
                 f"Eval session {self._eval_session_name} started with fresh QueueOrchestrator "
-                f"(n_concurrent_trials={self._n_concurrent_trials})"
+                f"(n_concurrent_trials={self._n_concurrent_trials}, rollback_hook registered)"
             )
 
     async def stop_eval_session(self) -> None:
@@ -619,8 +643,17 @@ class TerminalBenchGenerator(GeneratorInterface):
         )
 
         # Collect rollout_logprobs if any outputs have them (required for TIS)
-        # For zeroed/failed trajectories (response_ids=[0]), use [0.0] to match length
+        # For zeroed/failed trajectories, use [0.0] to match response_ids length.
+        #
+        # EDGE CASE: When TIS is enabled but some trajectories have no logprobs
+        # (e.g., due to ContextLengthExceededError mid-turn where Harbor couldn't
+        # collect logprobs before the error), we need to handle this gracefully:
+        # - If ALL trajectories have None logprobs → return None (TIS will fail upstream)
+        # - If SOME have logprobs → fill missing with zeros (TIS can still train on valid ones)
+        # - Log a warning when trajectories are missing logprobs for debugging
         has_any_logprobs = any(output.rollout_logprobs is not None for output in all_outputs)
+        missing_logprobs_count = sum(1 for output in all_outputs if output.rollout_logprobs is None)
+
         rollout_logprobs_list = None
         if has_any_logprobs:
             rollout_logprobs_list = []
@@ -628,9 +661,25 @@ class TerminalBenchGenerator(GeneratorInterface):
                 if output.rollout_logprobs is not None:
                     rollout_logprobs_list.append(output.rollout_logprobs)
                 else:
-                    # For zeroed trajectories, logprobs must match response_ids length
-                    # response_ids is [0] (length 1), so logprobs should be [0.0]
+                    # For trajectories missing logprobs, fill with zeros
+                    # This allows partial training on trajectories that have valid logprobs
                     rollout_logprobs_list.append([0.0] * len(output.response_ids))
+
+            if missing_logprobs_count > 0:
+                logger.warning(
+                    f"TIS mode: {missing_logprobs_count}/{num_trials} trajectories missing logprobs "
+                    f"(likely due to context length errors). Filled with zeros. "
+                    f"These trajectories will have no gradient contribution from TIS."
+                )
+        elif missing_logprobs_count > 0:
+            # All trajectories missing logprobs - this is a problem for TIS
+            # Log error and let TIS assertion fail with better context
+            logger.error(
+                f"TIS mode: ALL {num_trials} trajectories missing logprobs. "
+                f"This batch cannot be used for TIS training. "
+                f"Check if Harbor is collecting rollout_details (collect_rollout_details=true) "
+                f"and if context length errors are preventing logprob collection."
+            )
 
         generator_output: GeneratorOutput = {
             "prompt_token_ids": [output.prompt_ids for output in all_outputs],
