@@ -1,6 +1,7 @@
 import os
 from typing import List, Any, Dict, Optional, Tuple, Iterator
 from dataclasses import dataclass
+from loguru import logger
 from http import HTTPStatus
 import ray
 import torch
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     CompletionRequest,
     CompletionResponse,
 )
+from vllm.v1.metrics.loggers import LoggingStatLogger
 from vllm.lora.request import LoRARequest
 from torch.distributed import destroy_process_group
 from skyrl_train.distributed.utils import init_custom_process_group
@@ -47,6 +49,7 @@ class Logprob:
 
 def setup_envvars_for_vllm(kwargs, bundle_indices):
     noset_visible_devices = kwargs.pop("noset_visible_devices")
+    os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"  # TODO(Charlie): may not be needed.
     if kwargs.get("distributed_executor_backend") == "ray":
         # a hack to make the script work.
         # stop ray from manipulating *_VISIBLE_DEVICES
@@ -362,6 +365,22 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
         engine = self._get_engine()
         return await asyncio.to_thread(engine.collective_rpc, "destroy_weights_update_group")
 
+class V1LoggingStatLoggerFixed(LoggingStatLogger):
+    """
+    A fixed version of LoggingStatLogger that actually logs during the record method.
+    The log method is otherwise not called in the VLLM codebase.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.log_interval = 5
+
+    def record(self, *args: Any, **kwargs: Any) -> None:
+        super().record(*args, **kwargs)
+        now = time.monotonic()
+        if now - self.last_log_time > self.log_interval:
+            self.log()
+            self.last_log_time = now
 
 class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     """Asynchronous VLLM engine."""
@@ -373,35 +392,59 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         # TODO (erictang000): potentially enable log requests for a debugging mode
+        custom_chat_template_path = kwargs.pop("custom_chat_template_chat_completion_path", None)
+        stat_loggers = [V1LoggingStatLoggerFixed]
+        engine_args = vllm.AsyncEngineArgs(**kwargs)
+
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
             engine_args = vllm.AsyncEngineArgs(enable_log_requests=False, **kwargs)
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
-        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args)
+        engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
+
 
         # Adapted from https://github.com/volcengine/verl/blob/e90f18c40aa639cd25092b78a5ff7e2d2508c088/verl/workers/rollout/vllm_rollout/vllm_async_server.py#L327
         model_config = engine.model_config
         model_path = kwargs.get("model")
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`. See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
-        model_name = model_path
+        # Allow overriding the served model name (similar to vLLM's --served-model-name flag).
+        # Useful for Harbor/LiteLLM compatibility where model names must have exactly one '/'.
+        # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
+        served_model_name = kwargs.get("served_model_name")
+        model_name = served_model_name if served_model_name else model_path
 
         base_model_paths = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(engine, model_config, base_model_paths)
+        # vLLM 0.10+ requires model_config as second argument
+        models = OpenAIServingModels(
+            engine_client=engine,
+            model_config=model_config,
+            base_model_paths=base_model_paths,
+        )
+
+        # TODO(Charlie): adding custom chat template for chat completion. Hacky!
+        if custom_chat_template_path:
+            with open(custom_chat_template_path, "r") as f:
+                custom_chat_template_content = f.read()
+            logger.info(f"Initializing OpenAIServingChat with custom_chat_template read from: {custom_chat_template_path}")
+        else:
+            custom_chat_template_content = None
+
         # TODO(Charlie): revisit kwargs `enable_auto_tools` and `tool_parser` when we need to
         # support OAI-style tool calling; and `request_logger` for better debugging.
+        # vLLM 0.10+ requires model_config parameter
         self.openai_serving_chat = OpenAIServingChat(
             engine_client=engine,
             model_config=model_config,
             models=models,
             response_role="assistant",
             request_logger=None,
-            chat_template=None,
+            chat_template=custom_chat_template_content,
             chat_template_content_format="auto",
             **openai_kwargs,
         )
 
         # TODO(Charlie): revisit kwargs `return_tokens_as_token_ids`,
         # `enable_prompt_tokens_details`, `enable_force_include_usage`.
+        # vLLM 0.10+ requires model_config parameter
         self.openai_serving_completion = OpenAIServingCompletion(
             engine_client=engine,
             model_config=model_config,
@@ -525,6 +568,15 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
 
         body = request_payload.get("json", {})
         headers = request_payload.get("headers", {})
+
+        # TODO(Charlie): Hacky! We are hijacking to update the sampling params.
+        # Can we allow Harbor to use customized sampling params?
+        body.update({
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "min_p": 0.0,
+        })
 
         # 1. Build request
         try:

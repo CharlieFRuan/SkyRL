@@ -79,7 +79,8 @@ def _validate_openai_request(request_json: Dict[str, Any], endpoint: str) -> Opt
             ),
         )
     if _global_inference_engine_client.model_name != request_json["model"]:
-        # TODO(Charlie): add a config similar to vllm's `served_model_name`.
+        # NOTE: `served_model_name` config is now supported in generator.engine_init_kwargs.
+        # Both vllm_engine.py and InferenceEngineClient use it for Harbor/LiteLLM compatibility.
         # See https://github.com/NovaSky-AI/SkyRL/pull/238#discussion_r2326561295
         return ErrorResponse(
             error=ErrorInfo(
