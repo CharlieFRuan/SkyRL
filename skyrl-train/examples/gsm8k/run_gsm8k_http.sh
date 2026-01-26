@@ -1,23 +1,28 @@
+#!/bin/bash
 set -x
 
 # Colocated GRPO training+generation for Qwen2.5-1.5B-Instruct on GSM8K.
-
-# uv run examples/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
-# export WANDB_API_KEY=<your_key_here>
-# bash examples/gsm8k/run_gsm8k.sh
-
-# NOTE (sumanthrh): `micro_train_batch_size_per_gpu` and `micro_forward_batch_size_per_gpu` can be tuned
-
-# You can override the default values with e.g.: `NUM_GPUS=1 bash examples/gsm8k/run_gsm8k.sh`.
+# Uses HTTP endpoint for generation requests instead of direct engine calls.
+#
+# This script demonstrates:
+# 1. Using SkyRLGymHTTPGenerator which sends HTTP requests to /v1/chat/completions
+# 2. Enabling vLLM stats logging to see throughput metrics
+#
+# Usage:
+#   bash examples/gsm8k/run_gsm8k_http.sh
+#
+# To enable vLLM stats logging:
+#   bash examples/gsm8k/run_gsm8k_http.sh generator.enable_vllm_logging_stats=true
 
 : "${DATA_DIR:="$HOME/data/gsm8k"}"
 : "${NUM_GPUS:=4}"
-: "${LOGGER:=console}" # change to "console" to print to stdout
-
+: "${LOGGER:=console}"
 : "${INFERENCE_BACKEND:=vllm}"
-# : "${INFERENCE_BACKEND:=sglang}"
 
-uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_base \
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+uv run --isolated --extra $INFERENCE_BACKEND python "$SCRIPT_DIR/main_http.py" \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
   trainer.algorithm.advantage_estimator="grpo" \
@@ -52,8 +57,13 @@ uv run --isolated --extra $INFERENCE_BACKEND -m skyrl_train.entrypoints.main_bas
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
   trainer.logger="$LOGGER" \
-  trainer.project_name="gsm8k" \
-  trainer.run_name="gsm8k_test" \
+  trainer.project_name="gsm8k_http" \
+  trainer.run_name="gsm8k_http_test" \
   trainer.resume_mode=null \
-  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_ckpt" \
+  trainer.ckpt_path="$HOME/ckpts/gsm8k_1.5B_http_ckpt" \
+  generator.enable_http_endpoint=true \
+  generator.http_endpoint_host="127.0.0.1" \
+  generator.http_endpoint_port=8000 \
   $@
+
+

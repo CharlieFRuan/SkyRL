@@ -246,12 +246,13 @@ class VLLMInferenceEngine(BaseVLLMInferenceEngine):
                 "Pipeline parallelism is only supported with AsyncVLLMInferenceEngine. "
                 "Please set `generator.async_engine=true` in your config."
             )
-        # Pop enable_ray_prometheus_stats - only supported for async engine
+        # Pop stats options - only supported for async engine
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
-        if enable_ray_prometheus_stats:
+        enable_vllm_logging_stats = kwargs.pop("enable_vllm_logging_stats", False)
+        if enable_ray_prometheus_stats or enable_vllm_logging_stats:
             logger.warning(
-                "enable_ray_prometheus_stats is only supported with AsyncVLLMInferenceEngine. "
-                "Set `generator.async_engine=true` to enable Ray Prometheus stats logging."
+                "enable_ray_prometheus_stats and enable_vllm_logging_stats are only supported "
+                "with AsyncVLLMInferenceEngine. Set `generator.async_engine=true` to enable stats logging."
             )
         return vllm.LLM(*args, **kwargs)
 
@@ -354,10 +355,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._weight_loader = VLLMWeightLoader(self.llm, is_async=True)
+        self._stats_logging_task: Optional[asyncio.Task] = None
 
     def _create_engine(self, *args, **kwargs):
         openai_kwargs = pop_openai_kwargs(kwargs)
         enable_ray_prometheus_stats = kwargs.pop("enable_ray_prometheus_stats", False)
+        enable_vllm_logging_stats = kwargs.pop("enable_vllm_logging_stats", False)
+        self._enable_vllm_logging_stats = enable_vllm_logging_stats
 
         # TODO (erictang000): potentially enable log requests for a debugging mode
         if version.parse(vllm.__version__) >= version.parse("0.10.0"):
@@ -365,10 +369,13 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         else:
             engine_args = vllm.AsyncEngineArgs(disable_log_requests=True, **kwargs)
 
-        # Setup stat loggers for vLLM v1 if Ray Prometheus stats are enabled
+        # Setup stat loggers for vLLM v1 if stats are enabled
         stat_loggers = None
-        if enable_ray_prometheus_stats:
-            stat_loggers = self._create_ray_prometheus_stat_loggers()
+        if enable_ray_prometheus_stats or enable_vllm_logging_stats:
+            stat_loggers = self._create_stat_loggers(
+                enable_ray_prometheus_stats=enable_ray_prometheus_stats,
+                enable_logging_stats=enable_vllm_logging_stats,
+            )
 
         engine = vllm.AsyncLLMEngine.from_engine_args(engine_args, stat_loggers=stat_loggers)
 
@@ -401,28 +408,91 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
             models=models,
             request_logger=None,
         )
+
+        # Start background stats logging task if enabled
+        if enable_vllm_logging_stats:
+            self._start_stats_logging_task(engine)
+
         return engine
 
-    def _create_ray_prometheus_stat_loggers(self):
-        """Create Ray Prometheus stat loggers for vLLM metrics.
+    def _start_stats_logging_task(self, engine):
+        """Start a background task that periodically logs vLLM stats.
+
+        This mimics what vLLM's OpenAI API server does to enable LoggingStatLogger output.
+        Without this, LoggingStatLogger.log() is never called and no stats are printed.
+        """
+        try:
+            from vllm import envs
+            interval = envs.VLLM_LOG_STATS_INTERVAL
+        except (ImportError, AttributeError):
+            interval = 10.0  # Default fallback
+
+        async def _periodic_stats_logging():
+            """Background task to periodically call do_log_stats()."""
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        await engine.do_log_stats()
+                    except Exception as e:
+                        # Don't crash the background task on logging errors
+                        logger.debug(f"Error in stats logging: {e}")
+            except asyncio.CancelledError:
+                logger.debug("Stats logging task cancelled")
+                raise
+
+        # Create and store the task so we can cancel it later
+        self._stats_logging_task = asyncio.create_task(_periodic_stats_logging())
+        logger.info(f"Started background stats logging task (interval: {interval}s)")
+
+    def _stop_stats_logging_task(self):
+        """Stop the background stats logging task."""
+        if self._stats_logging_task is not None:
+            self._stats_logging_task.cancel()
+            self._stats_logging_task = None
+            logger.debug("Stopped background stats logging task")
+
+    def _create_stat_loggers(
+        self, enable_ray_prometheus_stats: bool = False, enable_logging_stats: bool = False
+    ):
+        """Create stat loggers for vLLM metrics.
 
         Returns stat_loggers in the format expected by vLLM's from_engine_args().
         For vLLM v1 (0.9.0+), this returns a list of StatLoggerFactory callables.
         For older versions where the v1 API is not available, this returns `None`.
 
+        Args:
+            enable_ray_prometheus_stats: If True, add RayPrometheusStatLogger which exports
+                metrics to Ray's metrics system. Accessible via:
+                  - Ray Dashboard Metrics tab: Look for metrics prefixed with "vllm:"
+                  - Ray Prometheus endpoint: curl http://<head-node>:8085/metrics | grep vllm
+            enable_logging_stats: If True, add LoggingStatLogger which prints metrics
+                directly to stdout/logs (useful for local debugging without Ray).
+
+        Note: Metrics are only visible while vLLM engines are actively running.
+
         See: https://docs.vllm.ai/en/latest/api/vllm/v1/metrics/ray_wrappers/
         """
         try:
-            # Try vLLM v1 API first (0.9.0+)
-            from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+            stat_loggers = []
 
-            logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
-            # For v1, stat_loggers is a list of factory callables
-            return [RayPrometheusStatLogger]
-        except ImportError:
+            if enable_ray_prometheus_stats:
+                from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
+                stat_loggers.append(RayPrometheusStatLogger)
+                logger.info("Enabling RayPrometheusStatLogger for vLLM inference engine metrics")
+
+            if enable_logging_stats:
+                from vllm.v1.metrics.loggers import LoggingStatLogger
+                stat_loggers.append(LoggingStatLogger)
+                logger.info(
+                    "Enabling LoggingStatLogger for vLLM metrics - metrics will be printed to logs"
+                )
+
+            return stat_loggers if stat_loggers else None
+        except ImportError as e:
             logger.warning(
-                "RayPrometheusStatLogger not available in this vLLM version. "
-                "For Ray-integrated metrics, upgrade to vLLM >= 0.9.0. "
+                f"vLLM v1 metrics API not available ({e}). "
+                "For metrics support, upgrade to vLLM >= 0.9.0. "
                 "Stat logging will be disabled."
             )
             return None
@@ -522,6 +592,7 @@ class AsyncVLLMInferenceEngine(BaseVLLMInferenceEngine):
         return await self._weight_loader.load_weights(request)
 
     async def teardown(self):
+        self._stop_stats_logging_task()
         await self._teardown_weight_receiver()
 
     async def reset_prefix_cache(self):

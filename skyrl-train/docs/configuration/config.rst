@@ -644,6 +644,26 @@ Generation Parameters
     - ``generator.chat_template.name_or_path``: Name or path of the chat template. If the source is ``name``, then it should be one of the supported templates in :code_link:`skyrl_train/generators/utils.py`. If the source is ``file``, then this field should be a path to a Jinja2 template file.
 - ``generator.chat_template_kwargs``: Chat templating kwargs to pass to ``tokenizer.apply_chat_template``. Applicable only for non-batched generation with ``generator.batched=false``.
 
+Observability Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- ``generator.enable_ray_prometheus_stats``: When enabled, vLLM inference engine metrics are exported to Ray's metrics system using ``vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger``. Requires ``generator.async_engine=true`` and vLLM >= 0.9.0.
+
+  **Note**: These metrics are NOT printed to stdout/stderr. Instead, they are accessible via:
+
+  - **Ray Dashboard Metrics tab**: Look for metrics prefixed with ``vllm:`` (e.g., ``vllm:num_requests_running``, ``vllm:kv_cache_usage_perc``)
+  - **Ray Prometheus endpoint**: ``curl http://<head-node>:8085/metrics | grep vllm``
+
+  Available metrics include:
+
+  - ``vllm:num_requests_running``: Number of requests in model execution batches
+  - ``vllm:num_requests_waiting``: Number of requests waiting to be processed
+  - ``vllm:kv_cache_usage_perc``: KV-cache usage percentage
+  - ``vllm:prefix_cache_queries``: Prefix cache queries (number of tokens)
+  - ``vllm:prefix_cache_hits``: Prefix cache hits (number of cached tokens)
+
+  These metrics are only visible while vLLM engines are actively running.
+
 Misc Configuration
 ~~~~~~~~~~~~~~~~~~
 

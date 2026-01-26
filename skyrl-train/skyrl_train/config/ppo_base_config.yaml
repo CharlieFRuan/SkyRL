@@ -235,9 +235,20 @@ generator:
   # Disable CUDA graphs by default for stability. Set to false for higher performance, but this may affect convergence for long-running and/or long context training jobs.
   enforce_eager: true
   fully_sharded_loras: false
-  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only)
-  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger
+  # Enable Ray Prometheus stats logger for vLLM inference engine metrics (vLLM v1 only).
+  # When enabled, uses vllm.v1.metrics.ray_wrappers.RayPrometheusStatLogger to export
+  # vLLM metrics (e.g., vllm:num_requests_running, vllm:kv_cache_usage_perc) to Ray's
+  # metrics system. These metrics are NOT printed to logs - instead they are accessible via:
+  #   - Ray Dashboard Metrics tab: Look for metrics prefixed with "vllm:"
+  #   - Ray Prometheus endpoint: curl http://localhost:8085/metrics | grep vllm
+  # Requires generator.async_engine=true.
   enable_ray_prometheus_stats: false
+  # Enable vLLM's LoggingStatLogger which prints metrics directly to stdout/logs.
+  # This is useful for local debugging without needing to query Ray's metrics system.
+  # Logs will include: prompt/generation throughput, running/waiting requests,
+  # GPU KV cache usage, and prefix cache hit rate.
+  # Requires generator.async_engine=true.
+  enable_vllm_logging_stats: false
   gpu_memory_utilization: 0.8
   max_num_seqs: 1024
   remote_inference_engine_urls: ["127.0.0.1:8001"]

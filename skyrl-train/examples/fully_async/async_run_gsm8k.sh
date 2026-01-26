@@ -68,6 +68,7 @@ uv run --isolated --extra $INFERENCE_BACKEND -m examples.fully_async.main_async 
   generator.weight_sync_backend=nccl \
   generator.async_engine=true \
   generator.batched=false \
+  generator.enable_ray_prometheus_stats=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=5 \
   generator.gpu_memory_utilization=0.8 \
