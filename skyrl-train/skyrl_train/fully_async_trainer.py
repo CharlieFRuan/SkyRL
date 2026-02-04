@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from torchdata.stateful_dataloader import StatefulDataLoader
 from typing import List, Tuple, Iterable, Set
 import inspect
+from skyrl_train.callbacks import TrainerState
 
 
 @dataclass
@@ -315,12 +316,54 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")
 
+    def _create_trainer_state(self, epoch: int) -> TrainerState:
+        """
+        Override to use num_steps_per_epoch for fully async training.
+
+        In fully async training, the dataloader has batch size of 1 and we
+        accumulate mini_batch_size samples before training, so the number
+        of steps per epoch is different from len(train_dataloader).
+        """
+        return TrainerState(
+            global_step=self.global_step,
+            epoch=epoch,
+            total_steps=self.total_training_steps,
+            num_steps_per_epoch=self.num_steps_per_epoch,
+            is_last_step=(self.global_step == self.total_training_steps),
+            is_epoch_end=(self.global_step % self.num_steps_per_epoch == 0) if self.num_steps_per_epoch > 0 else False,
+            metrics=dict(self.all_metrics),
+            timings=dict(self.all_timings),
+        )
+
     async def train(self):
         """
         Main fully async training loop for PPO
         """
         self.global_step = 0
 
+        # Initialize generator resources (e.g., shared QueueOrchestrator for Harbor)
+        # This must happen before any generate() calls
+        try:
+            await self.generator.startup()
+            logger.info("Generator startup complete")
+        except Exception as e:
+            logger.error(f"Generator startup failed: {e}")
+            raise
+
+        try:
+            await self._train_loop()
+        finally:
+            # Ensure generator cleanup happens even if training fails
+            try:
+                await self.generator.shutdown()
+                logger.info("Generator shutdown complete")
+            except Exception as e:
+                logger.warning(f"Generator shutdown error (non-fatal): {e}")
+
+    async def _train_loop(self):
+        """
+        Internal training loop, separated for proper generator lifecycle management.
+        """
         # Load checkpoint state if resumption is enabled. Also load the data UIDs that are already trained on.
         if self.resume_mode != ResumeMode.NONE:
             with Timer("load_checkpoints"):
@@ -346,11 +389,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("sync_weights_to_inference_engines"):
             await self.async_sync_policy_weights_to_inference_engines()
 
-        # Eval before training
-        if self.cfg.trainer.eval_interval > 0 and self.cfg.trainer.eval_before_train:
+        # Create initial trainer state for on_train_begin callback
+        start_epoch = self.global_step // self.num_steps_per_epoch
+        initial_state = self._create_trainer_state(epoch=start_epoch)
+
+        # Call on_train_begin callbacks (handles eval_before_train via EvaluationCallback)
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async(
+            "on_train_begin", initial_state, self._control, trainer=self
+        )
+
+        # Handle pre-training evaluation if requested by callbacks
+        if self._control.should_evaluate and self.eval_dataset is not None:
             with Timer("eval", self.all_timings):
                 eval_metrics = await self.eval()
-                self.tracker.log(eval_metrics, step=self.global_step)
+                self.tracker.log(eval_metrics, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+            self._control.should_evaluate = False
 
         # main training loop
         pbar = tqdm(total=self.total_training_steps, initial=self.global_step, desc="Training Step Progress")
@@ -412,43 +466,108 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         await self.async_sync_policy_weights_to_inference_engines()
                         await self.inference_engine_client.resume_generation()
 
-                # 5. Set logs for this training step.
+                # 5. Log status and update metrics
                 logger.info(status)
                 self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
-                self.tracker.log(self.all_metrics, step=self.global_step)
-                self.all_metrics = {}
-                pbar.update(1)
 
-                # 6. Eval and checkpointing if needed.
-                # NOTE(Charlie): eval does not overlap with training, but can overlap with generation. Is it fine?
-                if self.cfg.trainer.eval_interval > 0 and (
-                    self.global_step % self.cfg.trainer.eval_interval == 0
-                    or self.global_step == self.total_training_steps
-                ):
+                # 6. Create trainer state and call on_step_end callbacks
+                is_epoch_end = (_ == (1 + epoch) * self.num_steps_per_epoch)
+                is_last_step = (self.global_step == self.total_training_steps)
+                step_state = TrainerState(
+                    global_step=self.global_step,
+                    epoch=epoch,
+                    total_steps=self.total_training_steps,
+                    num_steps_per_epoch=self.num_steps_per_epoch,
+                    is_last_step=is_last_step,
+                    is_epoch_end=is_epoch_end,
+                    metrics=dict(self.all_metrics),
+                    timings=dict(self.all_timings),
+                )
+
+                self._control.reset()
+                self._control = await self.callback_handler.call_event_async(
+                    "on_step_end", step_state, self._control, trainer=self
+                )
+
+                # 7. Handle callback control signals
+
+                # Handle checkpoint saving
+                if self._control.should_save:
+                    with Timer("save_checkpoints", self.all_timings):
+                        await asyncio.to_thread(self.save_checkpoints)
+                    await self.callback_handler.call_event_async(
+                        "on_save", step_state, self._control, trainer=self
+                    )
+                    self._control.should_save = False
+
+                # Handle HF model saving
+                if self._control.should_save_hf_model:
+                    with Timer("save_hf_model", self.all_timings):
+                        await asyncio.to_thread(self.save_models)
+                    self._control.should_save_hf_model = False
+
+                # Handle evaluation
+                if self._control.should_evaluate and self.eval_dataset is not None:
                     with Timer("eval", self.all_timings):
                         eval_metrics = await self.eval()
                         self.all_metrics.update(eval_metrics)
-                if self.cfg.trainer.ckpt_interval > 0 and self.global_step % self.cfg.trainer.ckpt_interval == 0:
-                    with Timer("save_checkpoints", self.all_timings):
-                        await asyncio.to_thread(self.save_checkpoints)
-                if self.cfg.trainer.hf_save_interval > 0 and self.global_step % self.cfg.trainer.hf_save_interval == 0:
-                    with Timer("save_hf_model", self.all_timings):
-                        await asyncio.to_thread(self.save_models)
-                self.tracker.log({"timing/" + k: v for k, v in self.all_timings.items()}, step=self.global_step)
+                    await self.callback_handler.call_event_async(
+                        "on_evaluate", step_state, self._control, metrics=eval_metrics, trainer=self
+                    )
+                    self._control.should_evaluate = False
+
+                # 8. Log metrics
+                if self._control.should_log:
+                    log_payload = {
+                        **self.all_metrics,
+                        **{f"timing/{k}": v for k, v in self.all_timings.items()},
+                    }
+                    self.tracker.log(log_payload, step=self.global_step, commit=self.cfg.trainer.tracker_commit_each_step)
+                    await self.callback_handler.call_event_async(
+                        "on_log", step_state, self._control, logs=log_payload, trainer=self
+                    )
+
+                self.all_metrics = {}
                 self.all_timings = {}
+                pbar.update(1)
+
+                # Validate consumed data UIDs BEFORE incrementing global_step
+                # Skip validation at epoch boundaries where modulo wraps to 0
+                # This fixes the bug where the formula gives expected=0 at epoch end
+                steps_into_epoch = self.global_step % self.num_steps_per_epoch
+                if steps_into_epoch != 0:  # Skip at epoch boundaries
+                    expected_consumed_in_epoch = self.mini_batch_size * steps_into_epoch
+                    actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
+                    assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
+                        "Unexpected number of consumed data UIDs. Got: "
+                        f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
+                    )
+
                 self.global_step += 1
 
-                # 7. Notify generation workers that the capacity has increased, unblocking them.
+                # 9. Notify generation workers that the capacity has increased, unblocking them.
                 await self._staleness_manager.notify_capacity_change(self.global_step)
-                expected_consumed_in_epoch = self.mini_batch_size * ((self.global_step - 1) % self.num_steps_per_epoch)
-                actual_consumed_in_epoch = len(self.async_train_dataloader.get_consumed_uids_list())
-                assert actual_consumed_in_epoch == expected_consumed_in_epoch, (
-                    "Unexpected number of consumed data UIDs. Got: "
-                    f"{actual_consumed_in_epoch} != {expected_consumed_in_epoch}"
-                )
 
-            # 8. Per-epoch epilogue.
-            if self.cfg.trainer.update_ref_every_epoch and self.ref_model is not None:
+                # 10. Check for early stopping
+                if self._control.should_training_stop:
+                    logger.info("Training stopped early by callback")
+                    break
+
+            # 11. Per-epoch epilogue.
+            # Call on_epoch_end callbacks
+            epoch_state = self._create_trainer_state(epoch=epoch)
+            self._control.reset()
+            self._control = await self.callback_handler.call_event_async(
+                "on_epoch_end", epoch_state, self._control, trainer=self
+            )
+
+            # Handle ref model update at epoch end (via RefModelUpdateCallback or direct config)
+            ref_callback = self._get_ref_update_callback()
+            if (
+                self.ref_model is not None
+                and ref_callback is not None
+                and ref_callback.should_update_ref
+            ):
                 with Timer("update_ref_with_policy", self.all_timings):
                     await asyncio.to_thread(self.update_ref_with_policy)
 
@@ -470,13 +589,28 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             await self.async_train_dataloader.reset_at_epoch_end()
             await self._staleness_manager.validate_state_at_epoch_end(self.global_step)
 
+            if self._control.should_training_stop:
+                logger.info("Training stopped early by callback at epoch end")
+                break
+
             # End of an epoch.
+
+        # End of training
         pbar.close()
-        if self.cfg.trainer.ckpt_interval > 0:
+
+        # Call on_train_end callbacks
+        final_state = self._create_trainer_state(epoch=self.cfg.trainer.epochs - 1)
+        self._control.reset()
+        self._control = await self.callback_handler.call_event_async(
+            "on_train_end", final_state, self._control, trainer=self
+        )
+
+        # Handle final checkpoint/model save if requested by callbacks
+        if self._control.should_save:
             with Timer("save_checkpoints", self.all_timings):
                 await asyncio.to_thread(self.save_checkpoints)
                 logger.info("Saved final checkpoint.")
-        if self.cfg.trainer.hf_save_interval > 0:
+        if self._control.should_save_hf_model:
             with Timer("save_hf_model", self.all_timings):
                 await asyncio.to_thread(self.save_models)
                 logger.info("Saved final model.")

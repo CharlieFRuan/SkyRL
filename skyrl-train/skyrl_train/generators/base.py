@@ -41,9 +41,25 @@ class GeneratorOutput(TypedDict):
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # For RLOO-N: exclude sample from baseline computation (e.g., infrastructure failures)
+    # When True, the sample is masked from loss AND excluded from group baseline calculation.
+    # This allows distinguishing infrastructure failures (exclude) from agent failures (include with zero reward).
+    exclude_from_baseline: Optional[List[bool]]
 
 
 class GeneratorInterface(ABC):
+    """Abstract base class for trajectory generators.
+
+    Lifecycle:
+        1. __init__() - Synchronous initialization (no async resources)
+        2. startup() - Async initialization of resources (e.g., orchestrators, connections)
+        3. generate() - Called repeatedly during training
+        4. shutdown() - Async cleanup of resources
+
+    Implementations should handle errors gracefully in generate() to avoid killing the
+    training job. Use restart logic for recoverable failures.
+    """
+
     @abstractmethod
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
         """Generate trajectories for the input batch.
@@ -56,3 +72,24 @@ class GeneratorInterface(ABC):
             GeneratorOutput: Generated trajectories
         """
         raise NotImplementedError()
+
+    async def startup(self) -> None:
+        """Initialize async resources before training begins.
+
+        Called once after __init__ but before the first generate() call.
+        Override to initialize resources like orchestrators, connections, etc.
+
+        Default implementation does nothing (for backwards compatibility).
+        """
+        pass
+
+    async def shutdown(self) -> None:
+        """Cleanup async resources after training ends.
+
+        Called once after the last generate() call.
+        Override to cleanup resources like orchestrators, connections, etc.
+        Should be idempotent (safe to call multiple times).
+
+        Default implementation does nothing (for backwards compatibility).
+        """
+        pass
