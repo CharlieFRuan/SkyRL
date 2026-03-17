@@ -1013,35 +1013,48 @@ def test_validate_stepwise_is_last_step_length_mismatch():
         validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
 
 
-def test_validate_stepwise_last_element_not_true():
-    """is_last_step[-1] must be True."""
-    output = _make_stepwise_output()
-    output["is_last_step"][-1] = False
-    with pytest.raises(AssertionError, match="is_last_step\\[-1\\] must be True"):
-        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
-
-
-def test_validate_stepwise_non_contiguous():
-    """Non-contiguous trajectory ordering should fail."""
-    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2), contiguous=False)
-    with pytest.raises(AssertionError, match="Non-contiguous trajectory"):
-        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
-
-
-def test_validate_stepwise_boundary_without_is_last():
-    """Trajectory boundary where is_last_step is False should fail."""
-    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2))
-    # Traj 0 has steps at indices 0,1 and traj 1 at 2,3. Corrupt boundary.
-    output["is_last_step"][1] = False
-    with pytest.raises(AssertionError, match="Trajectory boundary at index 1"):
-        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
-
-
-def test_validate_stepwise_no_true_in_is_last_step():
+def test_validate_stepwise_no_last_step_at_all():
     """is_last_step with no True values should fail."""
     output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(3,))
     output["is_last_step"] = [False, False, False]
-    with pytest.raises(AssertionError, match="is_last_step\\[-1\\] must be True"):
+    with pytest.raises(AssertionError, match="is_last_step must contain at least one True"):
+        validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_non_contiguous_is_allowed():
+    """Non-contiguous trajectory ordering should pass (trajectory_ids handles mapping)."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2), contiguous=False)
+    # Interleaved: [traj0_step0, traj1_step0, traj0_step1(last), traj1_step1(last)]
+    # This is valid — the trainer uses trajectory_ids to map, not cumsum.
+    validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_duplicate_last_step():
+    """A trajectory with two is_last_step=True should fail."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2))
+    # Traj 0 has steps at indices 0,1. Set both to is_last=True.
+    output["is_last_step"][0] = True
+    with pytest.raises(AssertionError, match="multiple is_last_step=True"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_missing_last_step_for_trajectory():
+    """A trajectory with steps but no is_last_step=True should fail."""
+    output = _make_stepwise_output(n_trajectories=2, steps_per_traj=(2, 2))
+    # Traj 0 has steps at indices 0,1. Remove its last step marker.
+    output["is_last_step"][1] = False
+    # But we still need is_last_step to have at least one True and the
+    # last element to be True — so adjust: make traj 1's last step the final element.
+    # Current: [False, False, False, True] — traj 0 has no last step.
+    with pytest.raises(AssertionError, match="have steps but no is_last_step=True"):
+        validate_generator_output(num_prompts=2, generator_output=output, step_wise=True)
+
+
+def test_validate_stepwise_all_false_is_last_step():
+    """is_last_step with no True values should fail."""
+    output = _make_stepwise_output(n_trajectories=1, steps_per_traj=(3,))
+    output["is_last_step"] = [False, False, False]
+    with pytest.raises(AssertionError, match="is_last_step must contain at least one True"):
         validate_generator_output(num_prompts=1, generator_output=output, step_wise=True)
 
 

@@ -669,12 +669,12 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
     """Validate step-wise specific fields in the generator output.
 
     Checks that is_last_step and trajectory_ids are present, correctly sized,
-    contiguously ordered, and that is_last_step boundaries align with trajectory_id changes.
+    and internally consistent: each trajectory has exactly one is_last_step=True,
+    and there is a 1:1 correspondence between trajectory IDs and last-step markers.
 
-    The contiguity check is critical: the trainer's advantage broadcast uses
-    ``cumsum(shifted_is_last_step)`` to map each step to its trajectory, which
-    silently produces wrong results if steps from the same trajectory are interleaved
-    with steps from other trajectories.
+    Note: contiguous ordering is NOT required. The trainer uses trajectory_ids
+    to map each step to its trajectory's advantage (not a cumsum trick), so
+    interleaved ordering is safe.
     """
     assert generator_output.get("is_last_step") is not None, (
         "step_wise=True but `is_last_step` is missing from generator output"
@@ -693,39 +693,32 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
         f"trajectory_ids length ({len(trajectory_ids)}) must equal response_ids length ({num_responses})"
     )
 
-    assert is_last_step[-1] is True, (
-        "is_last_step[-1] must be True (the last sample must be the final step of a trajectory)"
+    num_last_steps = sum(1 for x in is_last_step if x)
+    assert num_last_steps >= 1, "is_last_step must contain at least one True value"
+
+    # Every trajectory must have exactly one is_last_step=True.
+    # Collect the set of trajectory IDs that have a last step marked.
+    def _tid_key(tid):
+        return tid.to_string() if hasattr(tid, "to_string") else str(tid)
+
+    last_step_tids = set()
+    all_tids = set()
+    for i in range(num_responses):
+        tid_key = _tid_key(trajectory_ids[i])
+        all_tids.add(tid_key)
+        if is_last_step[i]:
+            assert tid_key not in last_step_tids, (
+                f"Trajectory '{tid_key}' has multiple is_last_step=True entries. "
+                f"Each trajectory must have exactly one."
+            )
+            last_step_tids.add(tid_key)
+
+    # Every trajectory ID must have a corresponding last step
+    missing = all_tids - last_step_tids
+    assert not missing, (
+        f"Trajectories {missing} have steps but no is_last_step=True entry. "
+        f"Each trajectory must have exactly one last step."
     )
-
-    num_trajectories = sum(1 for x in is_last_step if x)
-    assert num_trajectories >= 1, "is_last_step must contain at least one True value"
-
-    # Validate contiguous ordering: all steps of the same trajectory must be adjacent.
-    seen_trajectory_ids = set()
-    prev_tid = None
-    for i, tid in enumerate(trajectory_ids):
-        tid_key = tid.to_string() if hasattr(tid, "to_string") else str(tid)
-        if tid_key != prev_tid:
-            assert tid_key not in seen_trajectory_ids, (
-                f"Non-contiguous trajectory at index {i}: trajectory '{tid_key}' appeared before "
-                f"(at earlier indices), then a different trajectory, then again here. "
-                f"Step-wise training requires all steps of the same trajectory to be adjacent."
-            )
-            if prev_tid is not None:
-                seen_trajectory_ids.add(prev_tid)
-            prev_tid = tid_key
-    if prev_tid is not None:
-        seen_trajectory_ids.add(prev_tid)
-
-    # Validate is_last_step aligns with trajectory boundaries
-    for i in range(num_responses - 1):
-        tid_cur = trajectory_ids[i].to_string() if hasattr(trajectory_ids[i], "to_string") else str(trajectory_ids[i])
-        tid_next = trajectory_ids[i + 1].to_string() if hasattr(trajectory_ids[i + 1], "to_string") else str(trajectory_ids[i + 1])
-        if tid_cur != tid_next:
-            assert is_last_step[i] is True, (
-                f"Trajectory boundary at index {i} ('{tid_cur}' → '{tid_next}') "
-                f"but is_last_step[{i}] is False. Must be True at trajectory boundaries."
-            )
 
 
 def build_dataloader(

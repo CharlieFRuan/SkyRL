@@ -807,10 +807,23 @@ class RayPPOTrainer:
                 lambd=lambd,
                 grpo_norm_by_std=grpo_norm_by_std,
             )
-            traj_ids = (
-                torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
+
+            # Map each step-sample to its trajectory's index in last_step_advantages.
+            # Uses trajectory_ids for correctness regardless of ordering (does not
+            # require contiguous step ordering like the previous cumsum approach).
+            trajectory_id_strings = data.metadata["trajectory_ids"]
+            last_step_indices = torch.where(is_last_step)[0].tolist()
+            # Build mapping: trajectory_id_string → index in last_step_advantages
+            tid_to_adv_idx = {}
+            for adv_idx, sample_idx in enumerate(last_step_indices):
+                tid_to_adv_idx[trajectory_id_strings[sample_idx]] = adv_idx
+            # Map every step to its trajectory's advantage index
+            traj_ids = torch.tensor(
+                [tid_to_adv_idx[tid] for tid in trajectory_id_strings],
+                device=is_last_step.device,
             )
-            num_groups = traj_ids[-1].item() + 1
+
+            num_groups = len(tid_to_adv_idx)
             assert num_groups == len(
                 last_step_advantages
             ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
