@@ -47,9 +47,10 @@ exec uv run --isolated --extra vllm --extra sandboxes \
   +terminal_bench_config=terminal_bench \
   +terminal_bench_config.trials_dir=$TRIALS_DIR \
   +terminal_bench_config.sandboxes_dir=$SANDBOXES_DIR \
-  +terminal_bench_config.harbor.agent.max_episodes=16 \
-  +terminal_bench_config.harbor.agent.enable_summarize=false \
-  +terminal_bench_config.harbor.environment.environment_type=modal \
+  +terminal_bench_config.harbor.max_episodes=16 \
+  +terminal_bench_config.harbor.enable_summarize=false \
+  +terminal_bench_config.harbor.environment_type=modal \
+  +terminal_bench_config.harbor.collect_rollout_details=true \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.policy.model.path="Qwen/Qwen3-8B" \
   trainer.placement.colocate_all=true \

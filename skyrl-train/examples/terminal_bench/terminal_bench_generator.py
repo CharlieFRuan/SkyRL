@@ -46,6 +46,148 @@ class TerminalBenchAgentOutput:
     exception_type: Optional[str] = None
     # Per-component reward breakdown (composite shaper only)
     reward_components: Optional[Dict[str, float]] = None
+    # Port of PR #1542 — raw per-turn rollout data from Harbor used for
+    # step-wise output construction. None for failed/errored trajectories.
+    rollout_details: Optional[List[Dict[str, Any]]] = None
+
+
+def build_step_wise_generator_output_from_trial_outputs(
+    all_outputs: List["TerminalBenchAgentOutput"],
+    failed_instance_ids: set,
+) -> GeneratorOutput:
+    """Flatten per-trajectory outputs into one GeneratorOutput entry per agent turn.
+
+    Port of PR #1542 / the modern-branch `build_step_wise_generator_output`,
+    adapted for penfever's `TerminalBenchAgentOutput` + `rollout_details`
+    layout. Successful trajectories are expanded to one entry per LLM turn;
+    failed trajectories (or any trajectory whose prompt had any failure in
+    legacy mode) collapse to a single zeroed placeholder step. The final
+    `is_last_step=True` marks each trajectory's last turn — consumed by
+    `compute_advantages_and_returns` via the cumsum-based trajectory grouping.
+    """
+    prompt_token_ids: List[List[int]] = []
+    response_ids: List[List[int]] = []
+    rewards: List[float] = []
+    loss_masks: List[List[int]] = []
+    stop_reasons: List[str] = []
+    is_last_step_list: List[bool] = []
+    out_trajectory_ids: List[TrajectoryID] = []
+    rollout_logprobs_list: List[List[float]] = []
+
+    for output in all_outputs:
+        tid = output.trajectory_id
+        rollout_details = output.rollout_details
+
+        # Placeholder for failed trajectories: single zeroed step so downstream
+        # tensor math keeps the same batch shape.
+        is_failed = (
+            output.stop_reason == "error"
+            or tid.instance_id in failed_instance_ids
+            or rollout_details is None
+            or len(rollout_details) == 0
+        )
+        if is_failed:
+            prompt_token_ids.append(output.prompt_ids if output.prompt_ids else [0])
+            response_ids.append([0])
+            rewards.append(0.0)
+            loss_masks.append([0])
+            stop_reasons.append("error")
+            is_last_step_list.append(True)
+            out_trajectory_ids.append(tid)
+            rollout_logprobs_list.append([0.0])
+            continue
+
+        # We only support a single linear main-agent rollout segment; summarization
+        # wraps the segment into additional RolloutDetail entries that we don't yet
+        # merge. This mirrors the TODO in the modern branch's build helper.
+        if len(rollout_details) != 1:
+            logger.warning(
+                f"Trajectory {tid}: expected exactly 1 rollout segment, got "
+                f"{len(rollout_details)}; collapsing to a single zeroed step."
+            )
+            prompt_token_ids.append([0])
+            response_ids.append([0])
+            rewards.append(0.0)
+            loss_masks.append([0])
+            stop_reasons.append("error")
+            is_last_step_list.append(True)
+            out_trajectory_ids.append(tid)
+            rollout_logprobs_list.append([0.0])
+            continue
+
+        rd = rollout_details[0]
+        if isinstance(rd, dict):
+            p_per_turn = rd.get("prompt_token_ids", [])
+            c_per_turn = rd.get("completion_token_ids", [])
+            logprobs_per_turn = rd.get("logprobs", None)
+        else:
+            p_per_turn = getattr(rd, "prompt_token_ids", []) or []
+            c_per_turn = getattr(rd, "completion_token_ids", []) or []
+            logprobs_per_turn = getattr(rd, "logprobs", None)
+
+        n_turns = len(c_per_turn)
+        if n_turns == 0 or len(p_per_turn) != n_turns:
+            logger.warning(
+                f"Trajectory {tid}: malformed rollout_details "
+                f"(prompts={len(p_per_turn)}, completions={n_turns}); collapsing."
+            )
+            prompt_token_ids.append([0])
+            response_ids.append([0])
+            rewards.append(0.0)
+            loss_masks.append([0])
+            stop_reasons.append("error")
+            is_last_step_list.append(True)
+            out_trajectory_ids.append(tid)
+            rollout_logprobs_list.append([0.0])
+            continue
+
+        for t in range(n_turns):
+            comp_ids = list(c_per_turn[t])
+            p_ids = list(p_per_turn[t])
+            is_last = t == n_turns - 1
+
+            # Step-wise reward convention: place reward only on the last turn,
+            # zero elsewhere — matches the modern branch and the cumsum-broadcast
+            # logic in `compute_advantages_and_returns`.
+            reward = output.reward if is_last else 0.0
+            step_loss_mask = [1] * len(comp_ids)
+            step_stop_reason = "complete" if is_last else "continue"
+
+            prompt_token_ids.append(p_ids)
+            response_ids.append(comp_ids)
+            rewards.append(reward)
+            loss_masks.append(step_loss_mask)
+            stop_reasons.append(step_stop_reason)
+            is_last_step_list.append(is_last)
+            out_trajectory_ids.append(tid)
+
+            # Per-turn logprobs: extract float values from {token, logprob} dicts
+            # when available; else pad with zeros so length matches comp_ids.
+            lp_for_turn: List[float] = []
+            if logprobs_per_turn is not None and t < len(logprobs_per_turn):
+                raw = logprobs_per_turn[t]
+                if isinstance(raw, list) and len(raw) == len(comp_ids):
+                    for entry in raw:
+                        if isinstance(entry, dict):
+                            lp_for_turn.append(float(entry.get("logprob", 0.0)))
+                        elif isinstance(entry, (int, float)):
+                            lp_for_turn.append(float(entry))
+                        else:
+                            lp_for_turn.append(0.0)
+            if len(lp_for_turn) != len(comp_ids):
+                lp_for_turn = [0.0] * len(comp_ids)
+            rollout_logprobs_list.append(lp_for_turn)
+
+    return {
+        "prompt_token_ids": prompt_token_ids,
+        "response_ids": response_ids,
+        "rewards": rewards,
+        "loss_masks": loss_masks,
+        "stop_reasons": stop_reasons,
+        "trajectory_ids": out_trajectory_ids,
+        "is_last_step": is_last_step_list,
+        "rollout_logprobs": rollout_logprobs_list,
+    }
 
 class TerminalBenchGenerator(GeneratorInterface):
     def __init__(
@@ -54,6 +196,7 @@ class TerminalBenchGenerator(GeneratorInterface):
         terminal_bench_cfg: DictConfig,
         inference_engine_client: InferenceEngineClient,
         tokenizer,
+        step_wise_training: bool = False,
     ):
         """
         Args:
@@ -66,6 +209,10 @@ class TerminalBenchGenerator(GeneratorInterface):
         self.generator_cfg = generator_cfg
         self.tokenizer = tokenizer
         self.model_name = generator_cfg.model_name
+        # Step-wise training: emit one GeneratorOutput entry per agent turn
+        # (with is_last_step / trajectory_ids), instead of one per trajectory.
+        # Requires Harbor's `rollout_details` (collect_rollout_details=true).
+        self.step_wise_training = step_wise_training
 
         # Core terminal bench config
         self.trials_dir = terminal_bench_cfg.trials_dir
@@ -758,6 +905,31 @@ class TerminalBenchGenerator(GeneratorInterface):
             "exclude_from_baseline": [output.exclude_from_baseline for output in all_outputs],
         }
 
+        # Port of PR #1542: when step-wise training is on, expand each
+        # trajectory's `rollout_details` into one entry per turn so the
+        # trainer can assign per-turn advantages and loss masks. We preserve
+        # the `rollout_metrics` (trajectory-level) but rebuild the per-row
+        # tensors from per-turn data.
+        if self.step_wise_training:
+            step_wise_output = build_step_wise_generator_output_from_trial_outputs(
+                all_outputs=all_outputs,
+                failed_instance_ids=failed_instance_ids,
+            )
+            # Keep the trajectory-level rollout_metrics we already aggregated.
+            step_wise_output["rollout_metrics"] = rollout_metrics
+            # Preserve exclude_from_baseline per *turn* by propagating the
+            # trajectory flag across every turn of that trajectory.
+            tid_to_exclude = {
+                o.trajectory_id: o.exclude_from_baseline for o in all_outputs
+            }
+            step_wise_output["exclude_from_baseline"] = [
+                tid_to_exclude.get(tid, False) for tid in step_wise_output["trajectory_ids"]
+            ]
+            step_wise_output["rollout_metrics"]["generate/num_step_wise_rows"] = len(
+                step_wise_output["response_ids"]
+            )
+            return step_wise_output
+
         return generator_output
 
     # Sentinel: returned by _classify_exception when the exception should be
@@ -1055,6 +1227,17 @@ class TerminalBenchGenerator(GeneratorInterface):
         if rollout_logprobs is not None:
             rollout_logprobs = rollout_logprobs[:max_response_tokens]
 
+        # Preserve the raw per-turn rollout_details so the step-wise generator
+        # path (port of PR #1542) can flatten them into per-turn entries
+        # downstream. Only stored when collected (requires Harbor's
+        # collect_rollout_details=true).
+        raw_rollout_details = None
+        if rollout_details is not None:
+            raw_rollout_details = [
+                rd if isinstance(rd, dict) else getattr(rd, "__dict__", None) or dict(rd.__dict__)
+                for rd in rollout_details
+            ]
+
         return TerminalBenchAgentOutput(
             response_ids=response_ids,
             reward=reward,
@@ -1065,4 +1248,5 @@ class TerminalBenchGenerator(GeneratorInterface):
             rollout_logprobs=rollout_logprobs,
             summarization_count=summarization_count,
             reward_components=reward_components,
+            rollout_details=raw_rollout_details,
         )

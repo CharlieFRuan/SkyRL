@@ -27,6 +27,7 @@ class TerminalBenchExp(BasePPOExp):
             terminal_bench_cfg=cfg.terminal_bench_config,  # Pass terminal_bench config to the generator
             inference_engine_client=inference_engine_client,
             tokenizer=tokenizer,
+            step_wise_training=cfg.trainer.get("step_wise_training", False),
         )
 
     def get_train_dataset(self):
