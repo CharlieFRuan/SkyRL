@@ -240,6 +240,13 @@ generator:
   inference_engine_expert_parallel_size: 1
   inference_engine_data_parallel_size: 1
   n_samples_per_prompt: 5
+  # Prefix-aware merging for step-wise training (port of PR #1538).
+  # When true and trainer.step_wise_training=true, consecutive turns in the
+  # same trajectory that share a token-exact prefix are collapsed into a
+  # single sequence (obs-delta tokens get loss_mask=0). This turns the
+  # worst-case O(T^2) step-wise cost into O(T) at the cost of an equality
+  # check between `prompt[i-1]+response[i-1]` and `prompt[i]`.
+  merge_stepwise_output: false
   async_engine: true
   batched: false
   max_input_length: ${trainer.max_prompt_length} # max generator input length used for multi-turn conversations - for single turn set equal to max_prompt_length

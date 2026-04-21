@@ -699,3 +699,183 @@ def get_response_ids_and_loss_mask_from_messages(messages: ConversationType, tok
         assert len(rollout_logprobs) == len(response_ids) if rollout_logprobs is not None else True
 
     return response_ids, loss_mask, rollout_logprobs
+
+
+# ---------------------------------------------------------------------------
+# Prefix-aware merging for step-wise training (port of PR #1538)
+# ---------------------------------------------------------------------------
+# When consecutive turns in the same trajectory share a token-exact prefix
+# (prompt[i] + response[i] is a prefix of prompt[i+1]), the training
+# computation on turn i is strictly contained in turn i+1 — so we can
+# collapse them into a single sequence with the extra observation tokens
+# loss-masked out. This turns the worst-case O(T^2) step-wise training cost
+# into O(T) for agents that don't do thinking-token stripping or other
+# context-management that would break the prefix property.
+
+
+def _is_prefix(maybe_prefix: List[int], candidate: List[int]) -> bool:
+    """Return True if ``maybe_prefix`` equals the leading tokens of ``candidate``."""
+    if len(maybe_prefix) > len(candidate):
+        return False
+    return maybe_prefix == candidate[: len(maybe_prefix)]
+
+
+def _slice_generator_output(generator_output: GeneratorOutput, indices: List[int]) -> GeneratorOutput:
+    """Slice a step-wise GeneratorOutput to keep only rows at ``indices``.
+
+    All sliced rows must share the same TrajectoryID — this helper is only
+    used by the per-trajectory prefix-aware merge pass.
+    """
+    assert len(indices) > 0, "indices must be non-empty"
+    sliced: GeneratorOutput = {}
+    for key, value in generator_output.items():
+        if key == "rollout_metrics":
+            sliced[key] = value
+        elif value is None:
+            sliced[key] = None
+        else:
+            sliced[key] = [value[i] for i in indices]
+    return sliced
+
+
+def _merge_single_trajectory(gen_out: GeneratorOutput) -> GeneratorOutput:
+    """Greedily merge turns of one trajectory using prefix matching.
+
+    Walks through the trajectory's turns; if the previous merge group's
+    ``acc_prompt + acc_response`` is a prefix of the next turn's prompt,
+    extends the group with the observation-delta (loss_mask=0, reward=0,
+    logprob=0) and then the new turn's response + loss_mask + logprobs.
+    When the prefix condition fails, flushes the current group and starts
+    a new one. Per-turn fields (``stop_reason``, ``is_last_step``,
+    ``trajectory_id``) are taken from the last turn in each merge group.
+    """
+    trajectory_ids = gen_out.get("trajectory_ids")
+    assert trajectory_ids is not None, "trajectory_ids is required for prefix-aware merging"
+    for i in range(0, len(trajectory_ids)):
+        # TrajectoryID is a non-frozen dataclass in penfever; compare by to_string().
+        left = trajectory_ids[i]
+        right = trajectory_ids[0]
+        left_key = left.to_string() if hasattr(left, "to_string") else left
+        right_key = right.to_string() if hasattr(right, "to_string") else right
+        assert left_key == right_key, "all entries in a single trajectory must have the same trajectory_id"
+
+    n = len(gen_out["response_ids"])
+    assert n > 0, "Expect non-empty GeneratorOutput."
+    is_token_level_rewards = isinstance(gen_out["rewards"][0], list)
+    has_logprobs = gen_out.get("rollout_logprobs") is not None
+    has_stop_reasons = gen_out.get("stop_reasons") is not None
+
+    out_prompt_ids: List[List[int]] = []
+    out_response_ids: List[List[int]] = []
+    out_loss_masks: List[List[int]] = []
+    out_logprobs: Optional[List[List[float]]] = [] if has_logprobs else None
+    out_rewards: list = []
+    out_stop_reasons: Optional[List[str]] = [] if has_stop_reasons else None
+    out_trajectory_ids: list = []
+    out_is_last_step: List[bool] = []
+
+    acc_prompt: List[int] = list(gen_out["prompt_token_ids"][0])
+    acc_response: List[int] = list(gen_out["response_ids"][0])
+    acc_loss_mask: List[int] = list(gen_out["loss_masks"][0])
+    acc_logprobs: Optional[List[float]] = list(gen_out["rollout_logprobs"][0]) if has_logprobs else None
+    acc_rewards_tokens: Optional[List[float]] = list(gen_out["rewards"][0]) if is_token_level_rewards else None
+    last = 0
+
+    def flush():
+        nonlocal acc_prompt, acc_response, acc_loss_mask, acc_logprobs, acc_rewards_tokens, last
+        out_prompt_ids.append(acc_prompt)
+        out_response_ids.append(acc_response)
+        out_loss_masks.append(acc_loss_mask)
+        if has_logprobs:
+            out_logprobs.append(acc_logprobs)
+        out_rewards.append(acc_rewards_tokens if is_token_level_rewards else gen_out["rewards"][last])
+        if has_stop_reasons:
+            out_stop_reasons.append(gen_out["stop_reasons"][last])
+        out_trajectory_ids.append(gen_out["trajectory_ids"][last])
+        out_is_last_step.append(gen_out["is_last_step"][last])
+
+    for i in range(1, n):
+        full_merged = acc_prompt + acc_response
+        if not _is_prefix(full_merged, gen_out["prompt_token_ids"][i]):
+            flush()
+            acc_prompt = list(gen_out["prompt_token_ids"][i])
+            acc_response = list(gen_out["response_ids"][i])
+            acc_loss_mask = list(gen_out["loss_masks"][i])
+            acc_logprobs = list(gen_out["rollout_logprobs"][i]) if has_logprobs else None
+            acc_rewards_tokens = list(gen_out["rewards"][i]) if is_token_level_rewards else None
+            last = i
+            continue
+
+        # obs_delta: the tokens in prompt[i] past the merged prefix. These came
+        # from the environment (not the assistant), so loss_mask / reward /
+        # logprob stay 0 over the delta.
+        obs_delta = gen_out["prompt_token_ids"][i][len(full_merged):]
+        acc_response.extend(obs_delta)
+        acc_loss_mask.extend([0] * len(obs_delta))
+        if acc_logprobs is not None:
+            acc_logprobs.extend([0.0] * len(obs_delta))
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend([0.0] * len(obs_delta))
+
+        acc_response.extend(gen_out["response_ids"][i])
+        acc_loss_mask.extend(gen_out["loss_masks"][i])
+        if acc_logprobs is not None:
+            acc_logprobs.extend(gen_out["rollout_logprobs"][i])
+        if acc_rewards_tokens is not None:
+            acc_rewards_tokens.extend(gen_out["rewards"][i])
+
+        last = i
+
+    flush()
+
+    return {
+        "prompt_token_ids": out_prompt_ids,
+        "response_ids": out_response_ids,
+        "rewards": out_rewards,
+        "loss_masks": out_loss_masks,
+        "stop_reasons": out_stop_reasons,
+        "rollout_metrics": gen_out.get("rollout_metrics", None),
+        "rollout_logprobs": out_logprobs,
+        "trajectory_ids": out_trajectory_ids,
+        "is_last_step": out_is_last_step,
+    }
+
+
+def merge_stepwise_output(generator_output: GeneratorOutput) -> GeneratorOutput:
+    """Prefix-aware merge of a step-wise GeneratorOutput (port of PR #1538).
+
+    Splits the batch into per-trajectory slices on ``is_last_step`` boundaries
+    (contiguity guaranteed by the step-wise validator), runs greedy
+    prefix-merging inside each trajectory, then concatenates. Safe no-op when
+    no consecutive turns share a prefix — worst case returns the input.
+
+    Requires the step-wise invariants (``trajectory_ids`` + ``is_last_step``
+    present) and does not support multimodal or router expert routing.
+    """
+    num_samples = len(generator_output["response_ids"])
+    assert (
+        generator_output.get("rollout_expert_indices") is None
+    ), "rollout_expert_indices not supported for prefix-aware merging"
+    assert (
+        generator_output.get("pixel_values") is None and generator_output.get("image_grid_thw") is None
+    ), "pixel_values and image_grid_thw not supported for step-wise training merging"
+    assert (
+        generator_output.get("is_last_step") is not None
+    ), "is_last_step is required for prefix-aware merging (enable step_wise_training)"
+    assert (
+        generator_output.get("trajectory_ids") is not None
+    ), "trajectory_ids is required for prefix-aware merging"
+
+    is_last_step = generator_output["is_last_step"]
+    trajectory_slices: List[GeneratorOutput] = []
+    start = 0
+    for i in range(num_samples):
+        if is_last_step[i]:
+            trajectory_slices.append(_slice_generator_output(generator_output, list(range(start, i + 1))))
+            start = i + 1
+
+    merged_slices = [_merge_single_trajectory(s) for s in trajectory_slices]
+    # concatenate_generator_outputs re-aggregates rollout_metrics; validation
+    # passes because num_prompts == num_responses row-for-row in the merged
+    # output (same as the input).
+    return concatenate_generator_outputs(merged_slices)

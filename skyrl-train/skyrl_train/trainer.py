@@ -428,9 +428,10 @@ class RayPPOTrainer:
                         # if we are not continuing sampling, we sleep the inference engine
                         await self.inference_engine_client.sleep()
 
-                    # 1.2 postprocess rewards
+                    # 1.2 postprocess rewards (+ optional prefix-aware merge, PR #1538 port).
+                    # uids may change when merging collapses turns, so we must unpack.
                     with Timer("postprocess_generator_output", self.all_timings):
-                        generator_output = self.postprocess_generator_output(generator_output, uids)
+                        generator_output, uids = self.postprocess_generator_output(generator_output, uids)
 
                     # 2. print example just for debugging
                     vis = self.tokenizer.decode(generator_output["response_ids"][0])
@@ -937,12 +938,42 @@ class RayPPOTrainer:
         return generator_output
 
     @torch.no_grad()
-    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> GeneratorOutput:
+    def postprocess_generator_output(self, generator_output: GeneratorOutput, uids: List[str]) -> Tuple[GeneratorOutput, List[str]]:
         """
         Converts to per token rewards and computes pass@N.
 
         In the future algorithm specific reward or loss mask post processing should be done here.
+
+        Returns a tuple of (generator_output, uids) since PR #1538's prefix-aware
+        merging may shrink the number of rows (new uids are rebuilt from the
+        merged trajectory_ids). Callers must unpack.
         """
+        # Port of PR #1538: prefix-aware merging for step-wise training.
+        # Runs BEFORE metrics so num_seq_{before,after}_merge are logged on the
+        # metric-visible batch; afterwards we rebuild uids from the merged
+        # trajectory_ids since the row count may have shrunk.
+        if (
+            self.cfg.trainer.step_wise_training
+            and self.cfg.generator.get("merge_stepwise_output", False)
+        ):
+            from skyrl_train.generators.utils import merge_stepwise_output as _merge_stepwise_output
+            num_seq_before_merge = len(generator_output["response_ids"])
+            generator_output = _merge_stepwise_output(generator_output)
+            num_seq_after_merge = len(generator_output["response_ids"])
+            self.all_metrics.update({
+                "generate/num_seq_before_merge": num_seq_before_merge,
+                "generate/num_seq_after_merge": num_seq_after_merge,
+            })
+            # Rebuild uids from merged trajectory_ids (instance_id groups rollouts
+            # from the same prompt for GRPO baseline).
+            uids = [
+                tid.instance_id if hasattr(tid, "instance_id") else str(tid)
+                for tid in generator_output["trajectory_ids"]
+            ]
+            logger.info(
+                f"Prefix-aware merging: {num_seq_before_merge} -> {num_seq_after_merge} sequences"
+            )
+
         generator_output_for_metrics = generator_output
         uids_for_metrics = uids
         if self.cfg.trainer.step_wise_training:
@@ -997,7 +1028,7 @@ class RayPPOTrainer:
 
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
-        return generator_output
+        return generator_output, uids
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:

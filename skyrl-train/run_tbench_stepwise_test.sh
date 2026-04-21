@@ -85,6 +85,7 @@ exec uv run --isolated --extra vllm --extra sandboxes \
   generator.batched=true \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=4 \
+  generator.merge_stepwise_output=true \
   generator.gpu_memory_utilization=0.55 \
   trainer.policy.fsdp_config.cpu_offload=true \
   trainer.ref.fsdp_config.cpu_offload=true \
