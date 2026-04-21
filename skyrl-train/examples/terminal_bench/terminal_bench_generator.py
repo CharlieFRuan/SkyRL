@@ -918,12 +918,13 @@ class TerminalBenchGenerator(GeneratorInterface):
             # Keep the trajectory-level rollout_metrics we already aggregated.
             step_wise_output["rollout_metrics"] = rollout_metrics
             # Preserve exclude_from_baseline per *turn* by propagating the
-            # trajectory flag across every turn of that trajectory.
+            # trajectory flag across every turn of that trajectory. TrajectoryID
+            # is a non-frozen dataclass (not hashable) so key by to_string().
             tid_to_exclude = {
-                o.trajectory_id: o.exclude_from_baseline for o in all_outputs
+                o.trajectory_id.to_string(): o.exclude_from_baseline for o in all_outputs
             }
             step_wise_output["exclude_from_baseline"] = [
-                tid_to_exclude.get(tid, False) for tid in step_wise_output["trajectory_ids"]
+                tid_to_exclude.get(tid.to_string(), False) for tid in step_wise_output["trajectory_ids"]
             ]
             step_wise_output["rollout_metrics"]["generate/num_step_wise_rows"] = len(
                 step_wise_output["response_ids"]
