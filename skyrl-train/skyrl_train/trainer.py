@@ -621,13 +621,34 @@ class RayPPOTrainer:
         logger.info("Training done!")
 
     def _remove_tail_data(self, entries: List[Any]) -> List[Any]:
-        """Remove tail data to have even shards"""
+        """Remove tail data to have even shards.
+
+        PR #1529 port: the sharding unit is the *generated* sequence, not the
+        prompt. With n_samples_per_prompt rollouts per prompt, dp_size of
+        sequences is served by ``dp_size / n_samples_per_prompt`` prompts
+        (rounded up). For step-wise runs each rollout further expands into
+        multiple turns, so alignment on the prompt dimension is even looser.
+        The old formula ``(len // dp_size) * dp_size`` silently zeroed the
+        batch when ``train_batch_size < dp_size`` (e.g. 4 prompts on 8 DP).
+        """
         dp_size = self.policy_model.actor_infos[0].rank.dp_size
         if self.critic_model is not None:
             dp_size = math.lcm(dp_size, self.critic_model.actor_infos[0].rank.dp_size)
         if self.ref_model is not None:
             dp_size = math.lcm(dp_size, self.ref_model.actor_infos[0].rank.dp_size)
-        return entries[: (len(entries) // dp_size) * dp_size]
+
+        n_samples = max(1, int(self.cfg.generator.n_samples_per_prompt))
+        # Each prompt contributes n_samples sequences; we want total sequences
+        # to be a multiple of dp_size. For step-wise, pad_batch still handles
+        # any residual in the trainer, so we only need to align prompts such
+        # that at least one full dp-shard's worth of sequences exists.
+        prompt_shard = max(1, dp_size // math.gcd(dp_size, n_samples))
+        if len(entries) < prompt_shard:
+            # Small-batch case (PR #1529 motivating example): n_samples * len(entries)
+            # already divides dp_size when prompt_shard was the GCD-based unit,
+            # so keep all entries.
+            return entries
+        return entries[: (len(entries) // prompt_shard) * prompt_shard]
 
     def build_models(self, PolicyWorker, CriticWorker, RefWorker):
         """
