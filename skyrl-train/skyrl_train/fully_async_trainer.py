@@ -898,7 +898,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         stalenesses = []
         discarded_count = 0
         discarded_uids = []
-        group_size = len(cur_generation_group_mini_batch[0].generator_output["response_ids"])
+        # Port of PR #1536: compute group_size per-group. In step-wise training
+        # each generation group has a variable number of GeneratorOutput rows
+        # (n_samples_per_prompt × turns_per_trajectory), so the uid fanout
+        # cannot be a batch-level constant. For non-step-wise, each group's size
+        # is just n_samples_per_prompt and the behavior is unchanged.
+        total_kept_samples = 0
 
         for cur_generated_output_group in cur_generation_group_mini_batch:
             cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
@@ -915,7 +920,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
             stalenesses.append(cur_staleness)
             generator_outputs.append(cur_generated_output_group.generator_output)
+            group_size = len(cur_generated_output_group.generator_output["response_ids"])
             uids.extend([cur_generated_output_group.uid] * group_size)
+            total_kept_samples += group_size
 
         # Handle edge case: all groups were discarded — signal caller to wait and retry
         if len(generator_outputs) == 0:
@@ -926,16 +933,22 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             )
             return None
 
-        # Log discard and effective batch statistics (always, not just when discarding)
+        # Log discard and effective batch statistics (always, not just when discarding).
+        # total_kept_samples is the sum across groups (PR #1536 port: step-wise groups vary).
         total_groups = len(cur_generation_group_mini_batch)
         kept_groups = len(generator_outputs)
         discard_rate = discarded_count / total_groups if total_groups > 0 else 0.0
         logger.info(
-            f"Step {self.global_step}: effective_batch={kept_groups * group_size} samples "
+            f"Step {self.global_step}: effective_batch={total_kept_samples} samples "
             f"({kept_groups}/{total_groups} groups), discard_rate={discard_rate:.1%}"
         )
 
-        generator_output = concatenate_generator_outputs(generator_outputs)
+        generator_output = concatenate_generator_outputs(
+            generator_outputs,
+            # PR #1536 port: validate step-wise-specific fields on the concatenated
+            # batch (is_last_step/trajectory_ids contiguity). Safe no-op when off.
+            step_wise=bool(self.cfg.trainer.step_wise_training),
+        )
         assert generator_output["rollout_metrics"] is not None, "Rollout metrics should be non-null."
         self.all_metrics.update(generator_output["rollout_metrics"])
 

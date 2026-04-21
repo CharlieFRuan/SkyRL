@@ -229,12 +229,22 @@ def get_metrics_from_generator_output(generator_output: GeneratorOutput, uids: L
     return mean_raw_reward, pass_at_n
 
 
-def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> GeneratorOutput:
+def concatenate_generator_outputs(
+    generator_outputs: List[GeneratorOutput],
+    step_wise: bool = False,
+) -> GeneratorOutput:
     """
-    Concatenate the generator outputs of multiple batches.
+    Concatenate the generator outputs of multiple batches and validate the result.
 
     We only aggregate rollout metrics the can deduced by responses and rewards, but not
     those that use `env_metrics` or `env_classes`.
+
+    Args:
+        generator_outputs: Per-batch generator outputs to concatenate.
+        step_wise: If True (port of PR #1536), validate step-wise specific fields
+            on the concatenated result (e.g. ``is_last_step``, ``trajectory_ids``
+            contiguity + alignment). The check defaults off to preserve non-stepwise
+            behavior.
     """
     assert len(generator_outputs) > 0
     has_rollout_logprobs = [output.get("rollout_logprobs") is not None for output in generator_outputs]
@@ -286,7 +296,7 @@ def concatenate_generator_outputs(generator_outputs: List[GeneratorOutput]) -> G
     from skyrl_train.utils.trainer_utils import validate_generator_output
 
     num_prompts = len(result["prompt_token_ids"])
-    validate_generator_output(num_prompts, result)
+    validate_generator_output(num_prompts, result, step_wise=step_wise)
 
     return result
 
