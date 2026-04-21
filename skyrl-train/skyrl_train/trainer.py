@@ -854,7 +854,17 @@ class RayPPOTrainer:
             rewards,
             loss_masks,
             logprobs,
+            # Port of PR #1285: warn (no truncation) when the per-sample tight
+            # bound max(p+r) exceeds the configured max_seq_len.
+            max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
         )
+        # PR #1285 batch-shape metrics: useful for diagnosing padding efficiency,
+        # especially in step-wise training where prompt/response lengths are
+        # anti-correlated across turns.
+        self.all_metrics.update({
+            "generate/batch_num_seq": int(sequences_tensor.shape[0]),
+            "generate/batch_padded_seq_len": int(sequences_tensor.shape[1]),
+        })
         # sanity check for tis
         if self.cfg.trainer.algorithm.use_tis:
             assert (
