@@ -556,12 +556,76 @@ def filter_generator_output(output: GeneratorOutput, kept_indices: List[int]) ->
     return filtered
 
 
-def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput):
+def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses: int) -> None:
+    """Port of PR #1281: verify step-wise generator output invariants.
+
+    In step-wise mode each trajectory may span multiple turns, so validation
+    must check that:
+      * `is_last_step` and `trajectory_ids` are present and length-matched.
+      * The final row's `is_last_step` is True.
+      * `trajectory_ids` groups are contiguous (no reappearance after a gap).
+      * `is_last_step[i]` is True iff trajectory id changes at i+1 (or i is the
+        last row).
+    The cumsum-based broadcast in `compute_advantages_and_returns` relies on
+    every one of these holding.
+    """
+    assert (
+        generator_output.get("is_last_step") is not None
+    ), "step_wise validation requires `is_last_step` in generator output"
+    assert (
+        generator_output.get("trajectory_ids") is not None
+    ), "step_wise validation requires `trajectory_ids` in generator output"
+
+    is_last_step = generator_output["is_last_step"]
+    trajectory_ids = generator_output["trajectory_ids"]
+
+    assert (
+        len(is_last_step) == num_responses
+    ), f"is_last_step length {len(is_last_step)} != num_responses {num_responses}"
+    assert (
+        len(trajectory_ids) == num_responses
+    ), f"trajectory_ids length {len(trajectory_ids)} != num_responses {num_responses}"
+    assert bool(is_last_step[-1]), "Last entry's is_last_step must be True"
+
+    # Contiguity: once a trajectory id appears then changes, it must not reappear.
+    seen_ids = set()
+    current_id = None
+    for i, tid in enumerate(trajectory_ids):
+        tid_key = tid.to_string() if hasattr(tid, "to_string") else tid
+        if tid_key != current_id:
+            assert tid_key not in seen_ids, (
+                f"trajectory_ids not contiguous: id {tid_key} reappears at row {i} "
+                f"after having ended"
+            )
+            if current_id is not None:
+                seen_ids.add(current_id)
+            current_id = tid_key
+
+    # is_last_step aligns with trajectory_id boundaries.
+    for i in range(num_responses):
+        if i == num_responses - 1:
+            expected = True
+        else:
+            tid_i = trajectory_ids[i]
+            tid_next = trajectory_ids[i + 1]
+            k_i = tid_i.to_string() if hasattr(tid_i, "to_string") else tid_i
+            k_next = tid_next.to_string() if hasattr(tid_next, "to_string") else tid_next
+            expected = k_i != k_next
+        assert bool(is_last_step[i]) == expected, (
+            f"is_last_step[{i}]={bool(is_last_step[i])} disagrees with trajectory "
+            f"boundary (expected {expected})"
+        )
+
+
+def validate_generator_output(num_prompts: int, generator_output: GeneratorOutput, step_wise: bool = False):
     """Validate the generator output.
 
     Args:
         num_prompts: Number of input prompts used to produce this output.
         generator_output: The generated output batch to validate.
+        step_wise: If True, skip the `num_prompts == num_responses` check (step-wise
+            emits one entry per turn, not per prompt) and additionally verify the
+            step-wise invariants (port of PR #1281).
     """
     if len(generator_output["response_ids"]) <= 0:
         raise RuntimeError("No outputs generated")
@@ -569,10 +633,14 @@ def validate_generator_output(num_prompts: int, generator_output: GeneratorOutpu
     # check that input prompts, response ids, and prompt token ids are all the same length
     num_responses = len(generator_output["response_ids"])
     num_prompt_tokens = len(generator_output["prompt_token_ids"])
-    assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
+    if not step_wise:
+        assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
     assert (
         num_responses == num_prompt_tokens
     ), f"Mismatch between responses ({num_responses}) and prompt_token_ids ({num_prompt_tokens})"
+
+    if step_wise:
+        _validate_step_wise_fields(generator_output, num_responses)
 
     # make sure all batch elements have the same length as response_ids (which should be non-zero)
     for key in generator_output:

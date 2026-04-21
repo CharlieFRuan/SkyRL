@@ -905,8 +905,13 @@ class RayPPOTrainer:
         if generator_output["rollout_metrics"] is not None:
             self.all_metrics.update(generator_output["rollout_metrics"])
 
-        if not self.cfg.trainer.step_wise_training:
-            validate_generator_output(len(input_batch["prompts"]), generator_output)
+        # Port of PR #1281: always validate — `step_wise=True` swaps to the
+        # step-wise invariants (is_last_step / trajectory_ids contiguity).
+        validate_generator_output(
+            len(input_batch["prompts"]),
+            generator_output,
+            step_wise=self.cfg.trainer.step_wise_training,
+        )
 
         return generator_output
 
@@ -1002,10 +1007,15 @@ class RayPPOTrainer:
             lambd = self.cfg.trainer.algorithm.lambd
             grpo_norm_by_std = self.cfg.trainer.algorithm.grpo_norm_by_std
             last_step_rewards = token_level_rewards[is_last_step]
-            # compatible with any advantage estimator
+            # Port of PR #1507: earlier turns can have response tokens where the *last*
+            # turn has padding (or vice versa). Using the last turn's response_mask
+            # zeros the advantage at positions where only an earlier turn has content.
+            # Use an all-ones mask so GRPO broadcasts the scalar advantage to every
+            # position, then re-apply each turn's own response_mask after broadcast.
+            last_step_response_mask = response_mask[is_last_step]
             last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
                 token_level_rewards=last_step_rewards,
-                response_mask=response_mask[is_last_step],
+                response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
                 index=index[is_last_step.cpu().numpy()],
                 adv_estimator=adv_estimator,
                 values=values[is_last_step] if values is not None else None,
@@ -1021,8 +1031,9 @@ class RayPPOTrainer:
             assert num_groups == len(
                 last_step_advantages
             ), f"number of groups {num_groups} doesn't match the number of trajectories as given by `is_last_step` {len(last_step_advantages)}. The `is_last_step` tensor is likely malformed"
-            advantages = last_step_advantages[traj_ids]
-            returns = last_step_returns[traj_ids]
+            response_mask_float = response_mask.to(last_step_advantages.dtype)
+            advantages = last_step_advantages[traj_ids] * response_mask_float
+            returns = last_step_returns[traj_ids] * response_mask_float
         else:
             # For RLOO-N: pass exclude_from_baseline if present in metadata
             exclude_from_baseline = data.metadata.get("exclude_from_baseline", None)

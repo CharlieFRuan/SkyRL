@@ -189,8 +189,15 @@ def validate_batch_sizes(cfg: DictConfig):
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
 
-    assert cfg.trainer.train_batch_size >= lcm_dp_size, (
-        f"train_batch_size ({cfg.trainer.train_batch_size}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
+    # The sharding constraint is on the number of *sequences* fed to the model,
+    # not on the number of prompts. With n_samples_per_prompt>=1 (and in
+    # step-wise, the turn expansion further multiplies this), as long as
+    # train_batch_size * n_samples_per_prompt >= lcm_dp_size we can always
+    # split into dp_size chunks. This relaxation mirrors PR #1529's spirit
+    # (step-wise / small-batch runs on many GPUs were the motivating case).
+    effective_batch = cfg.trainer.train_batch_size * cfg.generator.n_samples_per_prompt
+    assert effective_batch >= lcm_dp_size, (
+        f"train_batch_size * n_samples_per_prompt ({effective_batch}) should be larger than or equal to the least common multiple of the data parallel sizes of the enabled models: "
         f"policy_dp_size={policy_dp_size}, "
         f"ref_dp_size={ref_dp_size if use_ref_model else 'None'}, "
         f"lcm_dp_size={lcm_dp_size}"
@@ -608,6 +615,20 @@ def prepare_runtime_environment(cfg: DictConfig) -> dict[str, str]:
     if os.environ.get("RAY_ADDRESS"):
         logger.info("Exporting RAY_ADDRESS to ray runtime env")
         env_vars["RAY_ADDRESS"] = os.environ["RAY_ADDRESS"]
+
+    # Harbor + HuggingFace credentials that Ray workers need for sandbox/model access.
+    for key in (
+        "DAYTONA_API_KEY",
+        "DAYTONA_API_URL",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "HF_TOKEN",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+    ):
+        if os.environ.get(key):
+            logger.info(f"Exporting {key} to ray runtime env")
+            env_vars[key] = os.environ[key]
 
     if SKYRL_LD_LIBRARY_PATH_EXPORT:
         # export `LD_LIBRARY_PATH` to ray runtime env.
