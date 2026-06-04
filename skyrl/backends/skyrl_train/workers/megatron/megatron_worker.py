@@ -188,7 +188,9 @@ class MegatronWeightExtractor(WeightExtractor):
             self.bucket_index_groups.append([])
             curr_size = 0
             for idx in regular_task_indices:
-                size = sizes[idx]
+                # size is None when the param is absent on this rank (e.g. PP); treat as 0
+                # (matches the grouped path above), but still bucket the task so it is exported.
+                size = sizes[idx] if sizes[idx] is not None else 0
                 if curr_size + size > threshold:
                     self.bucket_index_groups.append([])
                     curr_size = 0

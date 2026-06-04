@@ -612,6 +612,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if cfg.generator.inference_engine.weight_sync_backend == "nccl":
         env_vars["NCCL_CUMEM_ENABLE"] = "0"
 
+    # DEBUG (charlie): capture cross-node NCCL aborts behind the silent policy_train worker kills.
+    env_vars["NCCL_DEBUG"] = "WARN"
+    # FIX (charlie): mlx5_2/mlx5_3 are bad IB HCAs (IBV_WC_RETRY_EXC_ERR -> crash). Restrict NCCL to the
+    # 6 good IB HCAs (matches the known-good all_reduce_bench config). Keeps fast IB instead of slow TCP.
+    env_vars["NCCL_IB_HCA"] = "mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9"
+
     if cfg.trainer.strategy == "megatron":
         # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core
         env_vars["RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO"] = "0"
@@ -692,7 +698,7 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
-    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "PYTORCH_CUDA_ALLOC_CONF"]:
         if value := os.environ.get(var_name):
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
