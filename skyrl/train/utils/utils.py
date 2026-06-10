@@ -614,9 +614,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
 
     # DEBUG (charlie): capture cross-node NCCL aborts behind the silent policy_train worker kills.
     env_vars["NCCL_DEBUG"] = "WARN"
-    # FIX (charlie): mlx5_2/mlx5_3 are bad IB HCAs (IBV_WC_RETRY_EXC_ERR -> crash). Restrict NCCL to the
-    # 6 good IB HCAs (matches the known-good all_reduce_bench config). Keeps fast IB instead of slow TCP.
-    env_vars["NCCL_IB_HCA"] = "mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9"
+    # FIX (charlie): pin NCCL to the 8 rail-optimized 400Gb/s IB HCAs (mlx5_2..mlx5_9), excluding the
+    # 100Gb/s storage/frontend rails (mlx5_0/1). mlx5_2/mlx5_3 were physically down on the head node
+    # (IBV_WC_RETRY_EXC_ERR -> crash) and have since been hardware-repaired (all 8 now LinkUp/400),
+    # so we use all 8 rails for full bandwidth instead of the earlier 6-rail (mlx5_4..9) workaround.
+    env_vars["NCCL_IB_HCA"] = "mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9"
 
     if cfg.trainer.strategy == "megatron":
         # this is needed for megatron-core >= 0.15.0, which requires devices to be visible while importing megatron.core

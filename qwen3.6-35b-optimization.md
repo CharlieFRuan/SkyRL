@@ -429,3 +429,243 @@ mlx5_2,mlx5_3 -> IBV_WC_RETRY_EXC_ERR -> crash; mlx5_4,mlx5_5 -> SUCCESS. Proves
 
 ### 2026-06-04 00:57 — REFINED: bad HCAs are NODE-SPECIFIC = the HEAD (5q745), not cluster-wide
 ibstat: 5q745 mlx5_2/mlx5_3 = Physical state "Polling", Rate 10 (DOWN); its mlx5_4-9 + ALL HCAs on n2/n3/m8htz = LinkUp/400. Confirmed n2<->n3 all_reduce on mlx5_2,mlx5_3 (no head) = SUCCESS. So only 5q745's two ports are physically down (link negotiation failing). Cross-node collectives all include the head (rank0/driver) -> NCCL using head's dead mlx5_2/3 broke whichever peer. Workaround NCCL_IB_HCA=mlx5_4-9 is global (loses 2/8 rails everywhere); proper fix = service 5q745 mlx5_2/mlx5_3 (cable/transceiver/switch port), or run head as Ray-head-only.
+
+---
+
+## 2026-06-05 — NEW SESSION: 20-step DAPO + LoRA run + enforce_eager investigation
+
+**Cluster reconciled to the 4 RESERVED nodes** {5q745(head), 77pcc/n2, 8vnx2/n4, m8htz}:
+- All 4 (+ n3) now have ALL 8 IB HCAs mlx5_2..mlx5_9 LinkUp/Active 400 Gb/s (hardware-fixed cluster-wide,
+  incl. head's previously-dead mlx5_2/mlx5_3). Verified via ibstat.
+- Live Ray cluster had n3(gccvh, unreserved) instead of n4 → started ray on n4 (enp1s0), stopped ray on n3.
+  Cluster now = exactly the 4 reserved nodes = 32 GPU.
+- **utils.py NCCL_IB_HCA updated**: mlx5_4..9 (6-rail workaround) → mlx5_2..9 (all 8 rails, full BW)
+  now that mlx5_2/3 are repaired. mlx5_0/1 (100Gb storage rails) still excluded.
+- n3(gccvh) tainted reserved-by=charlieruan and freed from Ray → used as the single-node box for the
+  enforce_eager experiment.
+
+**DAPO 20-step run LAUNCHED** (run_final_4node.sh, out_final_4node.log). epochs=20 in script (no max_steps
+knob exists) → will STOP run manually after 20 banked steps, then start LoRA. Startup clean:
+  init policy/ref done; init_weight_sync_state 10.6s; **sync_weights 37.88s with 0 IB errors** (the old
+  crash point — now healthy on 8 rails). Entering step-1 generation.
+
+**enforce_eager investigation (task):** WHY enforce_eager=True is needed + can we use partial CUDA graphs.
+Findings from reading installed vLLM 0.20.2 source:
+- CUDAGraphMode enum: NONE / PIECEWISE / FULL / FULL_DECODE_ONLY / FULL_AND_PIECEWISE. V1 default
+  (enforce_eager=False) = FULL_AND_PIECEWISE.
+- enforce_eager=True hard-forces cudagraph_mode=NONE (vllm/config/vllm.py:895 & :1087).
+- **GDN layers (gdn_attn.py:77) declare _cudagraph_support = UNIFORM_BATCH** (NOT ALWAYS). So GDN can do
+  PIECEWISE or FULL_DECODE_ONLY, but FULL on mixed prefill+decode batches is unsupported → the likely
+  source of "instability" when enforce_eager=False uses the FULL_AND_PIECEWISE default.
+- Mamba2 backend (mamba_attn.py:80) = same UNIFORM_BATCH.
+- gdn_prefill_backend ("triton"/"flashinfer"/"auto") is an EngineArgs field → additional_config; the GDN
+  op is a custom op excluded from piecewise graphs by default. triton avoids flashinfer JIT stalls.
+- MIDDLE GROUND to try: enforce_eager=False + compilation_config={"cudagraph_mode":"PIECEWISE"}
+  (GDN eager, dense/MoE captured) — or FULL_DECODE_ONLY.
+- Empirical probe running on n3: /home/charlie_key/eager_test/ (eager / default / piecewise / full_decode),
+  log = n3:/home/charlie_key/eager_test/probe.log.
+
+### enforce_eager — CONCLUSION (2026-06-05)
+**Why enforce_eager=True was set:** real CUDA-graph bug for GDN/linear-attention (Qwen3.5/3.6, Qwen3-Next).
+vLLM pads decode batches up to the captured cudagraph size; GDN/mamba kernels read model-input tensors
+PAST the scheduled-token prefix, so stale values in the padded tail corrupt the replayed decode graph's
+recurrent state -> subtly wrong tokens / KL mismatch / possible NaN (NOT a clean exception). Fixed upstream
+by vLLM PR #42779 (zero padded model inputs before graph replay).
+
+**Key finding: our vLLM 0.20.2 ALREADY contains the fix** — gpu_model_runner.py:3300-3301 inside _preprocess:
+`if num_input_tokens > num_scheduled_tokens: self.positions[num_scheduled_tokens:num_input_tokens].zero_()`
+(+ input_ids/inputs_embeds zeroing). So enforce_eager=False is SAFE here; bumping vLLM is NOT needed.
+
+**Empirical (single node n3, TP8, Qwen3.6-35B-A3B):**
+- Standalone generation: eager=725 tok/s | FULL_AND_PIECEWISE=7567 | PIECEWISE=3708 | FULL_DECODE_ONLY=7871.
+  All produce correct/coherent identical output. CUDA graphs ~10x faster than eager.
+- Sleep/wake (colocate offload) x3 cycles, greedy: NO garbage, NO crash in any mode. Text "divergence" is
+  benign run-to-run numeric nondeterminism — eager itself diverged MORE (13-15/32 identical) than
+  full_decode (30-31/32). So cudagraphs are NOT less stable than eager across sleep/wake.
+- GDN _cudagraph_support=UNIFORM_BATCH -> FULL on mixed prefill+decode unsupported; FULL_DECODE_ONLY uses
+  full graphs only for uniform decode batches (which GDN supports) + piecewise/eager prefill = best fit.
+
+**DECISION: most performant + stable = enforce_eager=False + cudagraph_mode=FULL_DECODE_ONLY (~7871 tok/s).**
+Use for the LoRA run (and future runs). The running 20-step DAPO keeps enforce_eager=True (already stable,
+do not disrupt). The LoRA run's first 1-2 steps double as in-loop validation; fall back to enforce_eager=True
+if any NaN/garbage reward appears.
+
+**Other RL frameworks (do they have this issue? — YES, qwen3.5≈qwen3.6 GDN):**
+- verl: plays safe with enforce_eager=True for the GDN family — examples/ascend_extras/grpo_trainer/
+  run_qwen3_next_80b_fsdp.sh:104 and examples/tuning/lora/run_qwen3_30b_a3b_megatron.sh:95. No padded-scrub
+  fix. (Its enforce_eager=False examples are dense models: qwen3-8b, qwen2.5-32b. qwen3_5_27b_fsdp.sh pins
+  an older vllm==0.18.0.)
+- prime-rl: defaults enforce_eager=False (cudagraphs ON for max perf) and SHIPS the workaround
+  src/prime_rl/inference/vllm/padded_input_scrub.py — monkey-patches GPUModelRunner._preprocess to zero the
+  padded tail, explicitly "until vLLM PR #42779 is in the pinned runtime." Also has GDN training patches
+  (cu_seqlens varlen threading in trainer/model.py for packed batches, ~0.23 KL mismatch fix).
+
+### DAPO 20-step run: STEP 1 STABLE
+step1 timing/step=1297.56s (generate 685s, fwd_logprobs 124s, policy_train 443.82s — the old crash point,
+clean), global_step=1, 0 IB/NCCL errors. step 2 started. Matches historical ~1300s/step on 8 IB rails.
+
+### 2026-06-05 — switched DAPO run to cudagraphs + backend testing
+- KILLED the eager 20-step DAPO (step1=1297s, eager) and RELAUNCHED on 4 nodes with
+  **enforce_eager=False + cudagraph_mode=FULL_DECODE_ONLY** (in run_final_4node.sh:
+  ENGINE_INIT_KWARGS now `{"gdn_prefill_backend":"triton","compilation_config":{"cudagraph_mode":"FULL_DECODE_ONLY"}}`).
+  Config confirmed in log. Watching step1 generate time vs the eager baseline (685s/step1).
+- SkyRL plumbing: engine_init_kwargs -> vLLM as **kwargs (ray_wrapped_inference_engine.py:309);
+  enforce_eager passed separately. **LoRA auto-forces enforce_eager=False** (config.py:821) — so the
+  LoRA run gets cudagraphs for free; I'll still pin FULL_DECODE_ONLY.
+- 10x number caveat: 725->7871 tok/s is a SMALL-batch standalone microbench; real RL rollout (2048 seqs,
+  8k tok) is more compute-bound so speedup is smaller, and generate is only ~53% of a step -> end-to-end
+  step speedup bounded ~2x. The live runs give the real eager(685s)-vs-FULL_DECODE_ONLY comparison.
+
+### gdn_prefill_backend (attention backend) — testing on n3
+- It IS a real vLLM 0.20.2 EngineArgs field (arg_utils.py:680, Literal["flashinfer","triton"]; default "auto"
+  -> flashinfer on H200). I chose "triton" only because the SkyRL example hardcoded it (cites vLLM#36921).
+- **Neither verl nor prime-rl set gdn_prefill_backend -> both use vLLM default "auto".**
+  - verl: no vLLM pin (0.8.4 commented), enforce_eager default False, gpu_mem 0.5-0.6; uses enforce_eager=True
+    for GDN examples (qwen3_next_80b, lora a3b). GDN can't do packed/THD seqs in Megatron (use_remove_padding=False).
+  - prime-rl: vllm>=0.22.0, enforce_eager=False default, gpu_mem 0.85-0.9; GDN LoRA patch (qkvz 4-out) +
+    varlen cu_seqlens training patch; MoE all2all_backend knob for expert parallel.
+- n3 sweep running: gdn_prefill_backend triton vs flashinfer vs auto (FULL_DECODE_ONLY, long prompts /
+  prefill-dominated) -> does flashinfer work on H200, and is it faster? Result -> backend.log.
+
+### RESULTS (2026-06-05 ~07:10)
+- **FULL_DECODE_ONLY real RL speedup: generate 685s (eager) -> 216.9s = 3.16x** (step1, 4-node DAPO).
+  Clean: sync_weights 38s, 0 IB errors, coherent output. (The 10x microbench did NOT carry, as flagged.)
+- **gdn_prefill_backend (n3, prefill-dominated, all outputs identical & correct):**
+  triton 88.2k tok/s | flashinfer 106.0k | auto 106.0k. flashinfer works on H200/vLLM0.20.2 & ~20% faster.
+  => triton hardcode (vLLM#36921) is a STALE workaround; **use gdn_prefill_backend="auto" (=flashinfer).**
+  Will bake "auto" into the LoRA run. (Current DAPO left on triton to avoid thrashing a healthy run;
+  prefill is a small fraction of the 217s generate, ~1% of step.)
+
+### DAPO 20-step run (FULL_DECODE_ONLY) — STABLE
+step1=833.0s (gen 216.9 + policy_train 444.1 + fwd/overhead) vs eager step1=1297.6s => **1.56x end-to-end**.
+step2 gen=217.0s (matches). rewards sane (pass@16 0.73/0.66), no NaN, 0 IB errors. 20 steps ~= 4.6h.
+
+- LoRA launcher prepped: /home/charlie_key/run_lora_4node.sh (rank32/alpha32, gdn_prefill_backend=auto,
+  LR=1e-5, FULL_DECODE_ONLY, isolated dapo_lora_r32_* ckpt/run paths). Launch after 20-step DAPO finishes.
+- 2-step STABLE: step2=770.5s (steady-state < step1 833s), global_step=2, rewards sane, 0 errors.
+  Steady ~770s/step -> 20 steps ~4.3h (~11:20). Switched to 30-min monitor cadence.
+- 2026-06-05 08:34: restarted 20-step DAPO with trainer.logger=wandb (WANDB_API_KEY via ~/.bashrc eval;
+  bashrc has non-interactive early-return so must eval the export line directly). Config otherwise identical
+  (enforce_eager=false, FULL_DECODE_ONLY). Both launchers now LOGGER=wandb.
+- wandb LIVE: https://wandb.ai/sky-posttraining-uc-berkeley/qwen3_5_dapo/runs/0vy3ith3 (project qwen3_5_dapo).
+  sync_weights 38s, step1 generate 216.7s (matches), 0 IB errors.
+- 20-step DAPO DONE (wandb 0vy3ith3). Final step-20 AIME eval: avg_score 0.4125, pass@32 0.90.
+  Steady ~700s/step, rewards raw -1.2 -> +0.4, pass@16 -> 0.94. Killed at 20 steps (epochs=20 != steps).
+  Launching LoRA run next.
+- LoRA run LIVE: https://wandb.ai/sky-posttraining-uc-berkeley/qwen3_5_dapo_lora/runs/32u1w9n8
+  rank32/alpha32, gdn_prefill=auto(flashinfer), FULL_DECODE_ONLY. sync_weights 54.9s, step1 gen 215.7s
+  (same as full-FT), no qkvz LoRA IndexError, 0 IB errors. enforce_eager auto-false for LoRA confirmed.
+- LoRA step1=1001.6s (policy_train 569.5s vs full-FT 444s; generate 215.7s same). LoRA step SLOWER than
+  full-FT (833s) -- adapter fwd/bwd + merge-for-sync overhead; confirm vs step2 steady-state. Rewards sane, no NaN.
+- LoRA 2-step STABLE (wandb 32u1w9n8): step2=945.0s steady (step1 1001.6s). LoRA ~25-35% SLOWER/step
+  than full-FT (~705s) -- adapter fwd/bwd + per-step merge-for-sync overhead > optimizer savings.
+  Rewards sane, no NaN, 0 errors. Plan: run LoRA to 20 steps (mirrors DAPO target; ~5.3h, ~18:30) then stop.
+- 2026-06-05 ~17:38: LoRA run CRASHED at step 17 -- vLLM mp worker stall (mq.dequeue timeout ->
+  RuntimeError: cancelled in VLLMInferenceEngine.generate on n2). Clean teardown (GPUs freed, ray intact).
+  No ckpt (interval=-1) so restarted from 0. FIX: reverted gdn_prefill_backend auto(flashinfer)->triton
+  (proven in full-FT 20-step run); kept FULL_DECODE_ONLY. Evals saved at step 5/10/15 before crash.
+- Enabled ckpt_interval=5 + max_ckpts_to_keep=5 for LoRA (resume_mode=latest) so a future transient
+  worker-stall can auto-resume instead of restarting from step 0. ckpt_path=~/ckpts/dapo_lora_r32_...
+
+### Step-17 LoRA crash — ROOT CAUSE (from infra-260605_130727.log, all nodes)
+Decisive line: `[Rank 0] Watchdog caught collective operation timeout: WorkNCCL(SeqNum=155856,
+OpType=_ALLGATHER_BASE, NumelIn=11577920, NumelOut=92623360, Timeout(ms)=600000) ran for 600071 ms`.
+=> A NCCL **_ALLGATHER_BASE hung for 600s** inside the vLLM **TP=8 inference group** (PG ID 2; NumelOut/In=8
+= TP world size => intra-engine, intra-node NVLink, NOT cross-node IB). ProcessGroupNCCL watchdog aborted ->
+VllmWorker-3 then -0 "died unexpectedly" (multiproc_executor.py:283) -> executor shut down -> pending
+generate() cancelled -> RuntimeError("cancelled") at trainer. So "cancelled" was 3 layers downstream of a
+**collective hang/deadlock** (not OOM, not a clean error). A 600s allgather hang = one rank never reached the
+collective, typically a CUDA kernel deadlock on one rank (flashinfer/triton) or an NVLink/driver hiccup;
+raising the timeout would not fix a true deadlock. flashinfer still the prime suspect (only new generate-path
+var) but unproven -> reverted to triton; if triton also hangs, suspect a flaky node/NVLink.
+
+### LoRA run (triton relaunch) — COMPLETE, 20 steps (wandb zc7xc463)
+Stable on triton, NO recurrence of the step-17 hang (passed step 17 cleanly). Steady ~900-945s/step
+(~25-35%% slower than full-FT). ckpts written every 5 steps (5/10/15/20). Training reward climbed
+raw -1.32 -> -0.48; step-20 AIME eval pass@32 0.867, avg_score -0.027 (vs full-FT 0.90 / 0.41 -- LoRA
+rank32 learns slower, expected). Killed at 20 steps. Both deliverable runs (full-FT + LoRA) DONE.
+
+### LoRA resume-from-step-20 FAILED — SkyRL LoRA+Megatron ckpt save bug (2026-06-06 ~03:03)
+On relaunch, resume crashed: `CheckpointingException: .../global_step_20/policy is not a distributed checkpoint`.
+Cause: every LoRA ckpt dir (5/10/15/20) has the optimizer `__N_0.distcp` shards (only ranks 24-31) +
+`adapter_*.pt`, but **NO torch `.metadata` file** -> dist_checkpointing.load/verify_checkpoint fails. Not
+step-20 corruption (15 identical). The LoRA save (megatron_strategy.save_checkpoint, is_lora path via
+io.local_work_dir temp-dir) doesn't land `.metadata` in the final dir, and load_checkpoint calls
+dist_checkpointing.load unconditionally (even LoRA, for optimizer/rng) -> unloadable. => LoRA ckpts are
+NOT resumable as-is (also no crash-recovery for LoRA). adapter_*.pt ARE valid (torch.load) for inference.
+ACTION: moved old ckpts to ..._bak_unloadable_step20 (preserved), restarted LoRA FRESH to keep it running
+per user's standing "keep running until I say stop". Proper fix (TODO w/ user): make load skip the
+optimizer distcp for LoRA (warm-start adapters from adapter_*.pt + global_step from trainer_state.pt),
+or fix the save so .metadata lands in the ckpt dir.
+
+### 2026-06-09 ~18:32 — LoRA crashed at step 350 (ENVIRONMENTAL) + resume fix implemented
+Crash: training finished step 350 fine, then cleanup_old_checkpoints() raised FileNotFoundError on a Ray
+worker .out file -- the 6-day-old Ray session LOGS dir (session_2026-06-03.../logs) had been DELETED
+(stale-session log reap; / only 42% full, ray cluster still alive 32 GPU). NOT a training/NCCL/cudagraph issue.
+Run had trained step1->350 cleanly: reward raw -1.3 -> ~+0.3, pass@16 -> 0.90-0.96.
+
+FIX for the broken LoRA resume (so we don't lose 350 steps): patched megatron_strategy.load_checkpoint
+(synced to all 4 nodes) -- for is_lora, SKIP dist_checkpointing.load (the optimizer distcp has no .metadata)
+and warm-start: load adapters from adapter_*.pt, reinit optimizer/LR/RNG; global_step+dataloader restored
+from trainer_state.pt/data.pt. Relaunched resume_mode=latest from step 350. VERIFY: reward must continue
+~0.3 (not reset to -1.3); if off, revert patch + restart fresh. (Proper long-term fix = make LoRA save land
+.metadata so optimizer state is resumable too.) If the ray-logs reap recurs -> restart ray for a fresh session.
+
+### LoRA resume — SECOND bug found; giving up on resume, restarting FRESH (2026-06-09 18:48)
+After the ckpt-load patch (issue #1: skip optimizer distcp) resume got further but hit issue #2:
+FileNotFoundError on .../global_step_350/policy/adapter_tp1_pp0_cp0_dp1_ep5_etp0.pt. The LoRA SAVE writes
+only 8 adapter files (tp0-3 x dp6/dp7, covering ep0-7) -- adapters are dp-REPLICATED but only dp6/dp7 ranks
+write files; LOAD's _get_rank_path expects EVERY rank's own adapter_..dp{N}..pt -> missing for dp0-5.
+=> SkyRL LoRA megatron ckpt is broken on TWO counts (missing optimizer .metadata + adapter per-rank coverage).
+Proper fix (for user, NOT done unsupervised - wrong rank-mapping would corrupt the model): make LoRA save
+write/lookup adapters by (tp,ep) ignoring dp (or have all dp ranks save), AND land optimizer .metadata.
+The issue-#1 patch in megatron_strategy.load_checkpoint is LEFT IN (correct partial fix, harmless to non-LoRA
+& fresh runs) but LoRA RESUME STILL DOES NOT WORK. Restarting LoRA FRESH on the fresh ray session; step-350
+adapters preserved in ckpts/..._bak_step350 (usable for inference/merge). Validation goal already met
+(350 stable steps, reward -1.3->+0.3, pass@16 ->0.96).
+
+### Note: GLOO/NCCL_SOCKET_IFNAME = control plane, not data path (clarifying line 285)
+Head has 5 IPv4 ifaces (enp2s0=10.40.16.194 cluster subnet; enp7s0/enp8s0 other fabrics; vxlan.calico
+k8s overlay; lo) -> NCCL/Gloo auto-detect can pick a wrong/non-routable one -> multi-node init hangs.
+NCCL_SOCKET_IFNAME pins only NCCL's TCP BOOTSTRAP/rendezvous + out-of-band control; the actual collective
+DATA rides InfiniBand (NCCL_IB_HCA=mlx5_2..9). GLOO_SOCKET_IFNAME pins Gloo (CPU backend, all-TCP: used by
+init_process_group/barrier/CPU collectives). So enp2s0 being a modest Ethernet link is fine - it's not the
+bandwidth path. Per-node (head/n2=enp2s0, n4=enp1s0); set at `ray start` per node, NOT in global runtime_env.
+
+### enforce_eager A/B run (2026-06-09 20:20, wandb run dapo_lora_r32_enforceEager_*)
+Launched fresh LoRA run with enforce_eager=true (no cudagraphs), compilation_config removed, gdn_prefill=triton,
+distinct run name (enforceEager) so it does NOT resume. Confirms the cudagraph win in the real RL loop:
+  generate(step1): enforce_eager=679.4s  vs  FULL_DECODE_ONLY=~217s  => ~3.1x slower generation (eager).
+(matches the earlier full-FT standalone finding.) Run script: run_lora_enforceEager_4node.sh; log out_lora_enforceEager.log.
+- enforce_eager A/B steady-state: step2=1398s (eager) vs ~957s (FULL_DECODE_ONLY) => ~1.46x slower end-to-end
+  (generate 679 vs 217 = 3.1x; train phase unchanged dilutes it). 2-step stable, fresh, no errors.
+
+### 2026-06-10 06:36 — non-LoRA FULL-FT run relaunched (enforce_eager=false + FULL_DECODE_ONLY)
+run_final_4node.sh: full fine-tune (NO LoRA), enforce_eager=false, FULL_DECODE_ONLY, LR=1e-6, triton prefill,
+wandb proj qwen3_5_dapo, ckpt_interval=5 + max_ckpts_to_keep=1 (per user). Fresh from scratch.
+DISK RISK (watching): workers n4/m8htz only ~15G free (67G model cache fills /), n2 14G free + 185G of OLD
+LoRA HF exports (exports/dapo_lora_r32_.../global_step_{135,270,300}, 62G each). Full-FT ckpt shards are
+node-local + large (model+optimizer) -> step-5 ckpt may NOT fit on n4/m8htz. PLAN: let step5 attempt; if it
+fails/fills disk -> revert ckpt_interval=-1, clear partial, relaunch (non-destructive), report. NOT deleting
+user artifacts unprompted; n2's 185G LoRA exports are the obvious free-able space if user wants ckpts to fit.
+wandb metric ingestion incident (5h delay, no loss) still backfilling; local datastore is source of truth.
+
+### CORRECTION (2026-06-10 07:51): disk was a FALSE ALARM + step-5 ckpt OK
+/home is /dev/md0 = 7.0T RAID, 6.3T FREE (I'd wrongly read df / = /dev/vda2 93G OS-root; ckpts live on /home).
+So disk is a NON-issue; no cleanup/fallback needed. Full-FT step-5 ckpt WROTE fine (save 59s; global_step_5
+= 118G apparent/sparse .distcp shards across nodes on /home; max_ckpts_to_keep=1 bounds it). Run healthy step5+.
+CAVEAT: global_step_5/policy has 8 .distcp shards but NO .metadata -> same SkyRL ckpt bug as LoRA; full-FT
+resume likely also fails (CheckpointingException). Ckpts write OK but may not be resumable for crash-recovery.
+Not testing resume now (won't disturb healthy run); will confirm only if a crash forces it.
+
+### CORRECTION (2026-06-10): the default cudagraph mode (FULL_AND_PIECEWISE) DOES work for Qwen3.6
+An earlier note hypothesized that the FULL_AND_PIECEWISE default (enforce_eager=False, cudagraph_mode unset)
+would be "the likely source of instability" because GDN is UNIFORM_BATCH and FULL-on-mixed-batches is
+unsupported. THAT WAS WRONG / imprecise: FULL_AND_PIECEWISE = (FULL for uniform decode, PIECEWISE for
+prefill/mixed) — it does NOT run FULL on mixed batches, so it already respects GDN's UNIFORM_BATCH limit.
+The "FULL-on-mixed unsupported" issue only applies to a *pure* cudagraph_mode=FULL.
+EVIDENCE: (a) standalone n3 probe: default resolved to FULL_AND_PIECEWISE, 7566 tok/s, correct output;
+(b) 4-node LoRA A/B (run dapo_lora_r32_defaultcg, wandb 4gte237g, out_lora_defaultcg.log): step1=1013.6s,
+generate=221.7s, GPU ~59GB/0.7util (no OOM), 0 crashes — i.e. ~identical to FULL_DECODE_ONLY (step1 ~1009s,
+gen 217s). => default and FULL_DECODE_ONLY are effectively equivalent here. We still PIN FULL_DECODE_ONLY as
+the conservative/memory-leaner choice (captures only decode graphs), but the default is NOT broken.

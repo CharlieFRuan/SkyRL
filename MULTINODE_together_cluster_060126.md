@@ -1,9 +1,14 @@
 # Running SkyRL Multi-Node Jobs E2E (Together cluster, direct/non-TCLI)
 
 This is a hands-on runbook for running SkyRL across **2+ Together GPU nodes directly over SSH**
-(bypassing TCLI/k8s), validated on 2× H200 nodes (`gpu-dp-q9wbz-5q745` + `gpu-dp-q9wbz-77pcc`).
-It covers environment setup, the NCCL/InfiniBand all-reduce sanity check, bringing up a Ray
-cluster, and launching a 2-node `run_gsm8k.sh`.
+(bypassing TCLI/k8s). First validated on 2× H200 (`gpu-dp-q9wbz-5q745` + `gpu-dp-q9wbz-77pcc`) and
+since run at **4× H200** for Qwen3.6-35B-A3B DAPO/LoRA. It covers environment setup, the
+NCCL/InfiniBand all-reduce sanity check, bringing up a Ray cluster, and launching a multi-node job.
+
+> **Starting a cluster on different/new nodes:** the node IPs, IB HCA names, and routed NIC are
+> **per-cluster/per-node — discover them (§1), don't blindly copy the literals below.** The values
+> shown (`mlx5_2..9`, `enp2s0`) are just what these particular nodes use; the IB HCA set and especially
+> the socket interface vary by node.
 
 > TL;DR of the hard-won lessons (see Troubleshooting for details):
 > - **`/home` and `/scratch` are node-local** — there is no shared FS. Replicate everything per node.
@@ -12,8 +17,16 @@ cluster, and launching a 2-node `run_gsm8k.sh`.
 >   driver in a multi-node cluster — it ships a base env without `ray` to remote workers.
 > - The node FQDN resolves to a **k8s ClusterIP that is not bindable** → always pass **real IPs**
 >   (`--node-ip-address`, `--local_addr`, `--master_addr`).
-> - Interconnect is **InfiniBand 400G NDR**; pin NCCL to the 400G HCAs and use the routed NIC for OOB.
+> - Interconnect is **InfiniBand 400G NDR**; pin NCCL to the 400G HCAs (discover per `ibstat`/§1 — here
+>   `mlx5_2..9`, skipping the 100G `mlx5_0/1`). This is the **data** path.
+> - **`NCCL_SOCKET_IFNAME`/`GLOO_SOCKET_IFNAME` are PER-NODE** (the TCP control/bootstrap path). The
+>   routed 10.40 NIC differs across nodes (`enp2s0` on most, `enp1s0` on at least one) — **auto-detect
+>   on each node**; a single hardcoded value silently breaks the odd node. Set them at `ray start` (the
+>   raylet hands them to the workers it spawns).
 > - A node whose **NVSwitch fabric manager is not `active`** cannot run CUDA (error 802) — check first.
+> - **Long-running (multi-day) Ray sessions get their `/tmp` session dir reaped** (the `logs/` +
+>   `node_ip_address.json` disappear): housekeeping tasks fail with `FileNotFoundError`, or new drivers
+>   can't connect (`a ray instance hasn't started`). Fix = **restart Ray into a fresh session** (§8).
 
 ---
 
@@ -73,8 +86,18 @@ for d in /sys/class/infiniband/mlx5_*; do
 done
 ```
 
-On these nodes the 400G NDR HCAs common to both are **`mlx5_4..9`** (the `ibp*` IPoIB interfaces show
-`DOWN` — that's fine, NCCL uses IB verbs directly). The routed node IP rides **`enp2s0`**.
+Pick the **400G NDR HCAs that are `ACTIVE` on every node** for `NCCL_IB_HCA`. On these nodes the full
+healthy set is **`mlx5_2..9`** (8 ports); **`mlx5_0/1` are the 100G rails and are skipped**. (History:
+while 5q745's `mlx5_2/mlx5_3` were transiently down we pinned the 6-port subset `mlx5_4..9`; once the
+HCAs were repaired we went back to all 8. Rule: **exclude any port not `ACTIVE`/400G on *all* nodes**,
+because a dead HCA shows up as `IBV_WC_RETRY_EXC_ERR(12)` → `ncclRemoteError` mid-run, not at startup.)
+The `ibp*` IPoIB interfaces showing `DOWN` is fine — NCCL uses IB verbs directly.
+
+Find the **routed node IP and its NIC, per node** — this is what NCCL/Gloo OOB and `--node-ip-address`
+use, and **it is not the same interface name on every node**:
+```bash
+ip -o -4 addr show | awk '$4 ~ /^10\.40\./ {print $2, $4}'   # e.g. enp2s0 on most nodes, enp1s0 on n4
+```
 
 ---
 
@@ -121,13 +144,21 @@ Export these wherever NCCL runs (the `ray start` shells on every node, and the d
 on the `ray start` command means the raylet and all spawned workers inherit them.
 
 ```bash
-export NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9   # 400G NDR ports (skip slow/RoCE)
-export NCCL_SOCKET_IFNAME=enp2s0      # OOB/bootstrap over the routed node IP
-export GLOO_SOCKET_IFNAME=enp2s0
+# IB HCA (DATA path) = the 400G ports ACTIVE on ALL nodes (from §1). These nodes: mlx5_2..9 (skip 100G mlx5_0/1).
+export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
+# SOCKET_IFNAME (TCP CONTROL/bootstrap path) is PER-NODE — auto-detect the routed 10.40 NIC on THIS node:
+export IFACE=$(ip -o -4 addr show | awk '$4 ~ /^10\.40\./ {print $2; exit}')   # enp2s0 / enp1s0 / ...
+export NCCL_SOCKET_IFNAME=$IFACE
+export GLOO_SOCKET_IFNAME=$IFACE      # Gloo CPU collectives (init_process_group/barrier) are all-TCP too
 # export NCCL_DEBUG=INFO              # uncomment to confirm transport selection
 ```
 
-Confirm NCCL picks IB in logs: `NET/IB : Using [0]mlx5_4:1/IB ... ; OOB enp2s0:<ip>`.
+`NCCL_IB_HCA` selects the **data** transport (collectives ride IB); the `*_SOCKET_IFNAME` vars only pin
+the **TCP control/bootstrap + out-of-band** path, so the NIC being a modest Ethernet link is fine. The
+socket vars are **per-node**: auto-detect them in every `ray start` shell — do **not** hardcode one
+value cluster-wide, or it will be wrong on a node whose routed NIC differs (e.g. `enp1s0`) and the
+multi-node process-group init will hang. Confirm NCCL picks IB in logs:
+`NET/IB : Using [0]mlx5_2:1/IB ... ; OOB <iface>:<ip>`.
 
 ---
 
@@ -144,7 +175,7 @@ Launcher (`run_bench.sh`) — note **real IPs** and `--local_addr` per node:
 NODE_RANK=${1:?need node_rank}; shift
 if [ "$NODE_RANK" = "0" ]; then LOCAL_ADDR=10.40.16.194; else LOCAL_ADDR=10.40.58.131; fi
 export PATH=$HOME/.local/bin:$PATH PYTHONUNBUFFERED=1
-export NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0
+export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0
 exec /home/charlie_key/SkyRL/.venv/bin/python -u -m torch.distributed.run \
   --nnodes=2 --node_rank="$NODE_RANK" --nproc_per_node=8 \
   --rdzv_backend=static --master_addr=10.40.16.194 --master_port=6000 --local_addr="$LOCAL_ADDR" \
@@ -175,15 +206,21 @@ that already has `ray`/`skyrl`/`torch`/`vllm`. Use **real IPs**; the worker must
 independent of the ssh session, so use `--block` inside a held-open session (or `nohup setsid`).
 
 ```bash
+# IB HCA set (same on all healthy nodes); IFACE is auto-detected PER node (see below).
+HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
+
 # HEAD (this node)
 cd $PROJECT
-NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0 \
+IFACE=$(ip -o -4 addr show | awk '$4 ~ /^10\.40\./ {print $2; exit}')   # this node's routed NIC
+NCCL_IB_HCA=$HCA NCCL_SOCKET_IFNAME=$IFACE GLOO_SOCKET_IFNAME=$IFACE \
   $VENV/bin/ray start --head --node-ip-address=$HEAD_IP --port=$RAY_PORT --num-gpus=$GPUS_PER_NODE --dashboard-host=0.0.0.0
 
-# WORKER — run in a PERSISTENT background session (--block keeps it foreground under the ssh)
-ssh n2 'NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0 \
+# WORKER — IFACE is auto-detected ON THE WORKER (may be enp1s0, not enp2s0!). PERSISTENT session (--block).
+ssh n2 'IFACE=$(ip -o -4 addr show|grep " 10.40"|awk "{print \$2}"|head -1); \
+  NCCL_IB_HCA='"$HCA"' NCCL_SOCKET_IFNAME=$IFACE GLOO_SOCKET_IFNAME=$IFACE \
   /home/charlie_key/SkyRL/.venv/bin/ray start --address=10.40.16.194:6379 \
   --node-ip-address=10.40.58.131 --num-gpus=8 --block' > ray_worker.log 2>&1 &
+# (verify each node's raylet got the right NIC:  tr '\0' '\n' </proc/$(pgrep -x raylet)/environ | grep SOCKET_IFNAME )
 
 # verify: should report ALIVE=2, GPU=16
 $VENV/bin/python - <<'PY'
@@ -211,7 +248,7 @@ sed 's#uv run --isolated --extra fsdp -m#'"$VENV"'/bin/python -m#' \
 
 cd $PROJECT
 RAY_ADDRESS=$HEAD_IP:$RAY_PORT NUM_GPUS=$GPUS_PER_NODE LOGGER=console \
-NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0 \
+NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0 \
   bash ~/run_gsm8k_venv.sh \
     trainer.placement.policy_num_nodes=$NUM_NODES \
     trainer.placement.critic_num_nodes=$NUM_NODES \
@@ -262,18 +299,34 @@ If you reserved nodes with a taint, release them:
 | Worker joins (CPU counts) then drops; GPUs never reach 16 | `ray start` daemons **SIGHUP'd** when the ssh session closed | run with `--block` in a held-open session, or `nohup setsid` |
 | `AssertionError: ... policy_mini_batch_size_per_gpu N should be divisible by micro_train_batch_size_per_gpu M` | batch math doesn't divide at the new GPU count | set `micro_{train,forward}_batch_size_per_gpu` to a divisor of `mini_batch*n_samples/world_size` |
 | all-reduce bench "succeeds" instantly with **no result table** | upstream bug: `__main__` never calls `run()`; or block-buffered stdout | ensure `run(local_rank)` is called; set `PYTHONUNBUFFERED=1` |
-| NCCL falls back to slow path / low busbw | wrong/extra HCAs selected (10G SDR or RoCE) | pin `NCCL_IB_HCA` to the 400G NDR ports common to all nodes; `NCCL_SOCKET_IFNAME=enp2s0` |
+| NCCL falls back to slow path / low busbw | wrong/extra HCAs selected (100G or RoCE) | pin `NCCL_IB_HCA` to the 400G NDR ports common to all nodes (skip `mlx5_0/1`) |
+| Multi-node process-group init **hangs** at `init_worker_process_group` / Gloo `connectFullMesh ... Connection refused remote=[127.0.0.1]` | `*_SOCKET_IFNAME` unset or hardcoded to a NIC name that **doesn't exist on that node** (NIC differs per node) → auto-detect picks a non-routable iface / loopback | set `NCCL_SOCKET_IFNAME`/`GLOO_SOCKET_IFNAME` to the node's own routed 10.40 NIC **at `ray start`** (§3 auto-detect). NOT a single cluster-wide value |
+| Mid-run crash: `cleanup_old_checkpoints ... FileNotFoundError: .../session_*/logs/worker-*.out`, or relaunch fails `Can't find node_ip_address.json ... a ray instance hasn't started` | a `/tmp` reaper deleted the **stale (multi-day) Ray session dir** out from under the live cluster (logs + `node_ip_address.json` gone) → zombie cluster | **restart Ray into a fresh session**: `ray stop` on all nodes (+ `pkill -9 -x raylet gcs_server`), then `ray start --head` again + rejoin workers. A fresh session resets the reap clock. Not disk-full and not a training bug |
+| `IBV_WC_RETRY_EXC_ERR(12)` / `ncclRemoteError` appearing **mid-training** (not at startup), often at the backward all-reduce | a specific IB HCA is physically down/degraded on one node (e.g. `Polling`/`10 Gb` instead of `LinkUp`/`400`) and NCCL auto-selected it | `ibstat`/§1 across all nodes; **drop the bad port from `NCCL_IB_HCA`** (or repair it). Don't fall back to TCP (`NCCL_IB_DISABLE=1`) unless you must — it's ~slow |
 | Repeated `Failed to establish connection to the metrics exporter agent` | Ray prometheus/metrics agent only | benign — ignore |
 
 ---
 
 ## 9. Notes specific to this cluster
 
-- `5q745` ↔ `77pcc` internal IPs: `10.40.16.194` / `10.40.58.131`; both reachable by `~/.ssh/id_ed25519`.
-- `m8htz` (`10.40.62.120`) has a **broken fabric manager** (failed since 2026-05-27) — do not use until an
-  admin restarts `nvidia-fabricmanager`.
+- Node roster used for the 4-node runs (IP / routed NIC — **note n4 differs**), all reachable by `~/.ssh/id_ed25519`:
+  | alias | node | IP | routed NIC |
+  |-------|------|----|-----------|
+  | (head) | gpu-dp-q9wbz-5q745 | 10.40.16.194 | enp2s0 |
+  | n2 | gpu-dp-q9wbz-77pcc | 10.40.58.131 | enp2s0 |
+  | n4 | gpu-dp-q9wbz-8vnx2 | 10.40.40.19 | **enp1s0** |
+  | m8htz | gpu-dp-q9wbz-m8htz | 10.40.62.120 | enp2s0 |
+  (the head also has non-routable ifaces — `enp7s0`/`enp8s0`/`vxlan.calico` — which is why auto-detect must
+  filter for the `10.40.` subnet.)
+- `m8htz`'s fabric manager was **broken (failed 2026-05-27) but has since been repaired** — it ran the full
+  4-node job fine. Always re-check `nvidia-fabricmanager`/`ibstat` per §1 before trusting any node; health
+  changes over time (5q745's `mlx5_2/mlx5_3` were also down for a while, then fixed).
 - Reserve a node from TCLI scheduling with a `NoSchedule` taint (TCLI's `_is_valid_gpu_node` skips tainted
-  nodes): `kubectl taint nodes <node> reserved-by=<you>:NoSchedule`.
+  nodes): `kubectl taint nodes <node> reserved-by=<you>:NoSchedule`; release with the trailing `-`.
+- Found a fresh node? Run §1 (fabric + `ibstat` 400G ports + `ip addr` routed NIC) **before** adding it —
+  that's the whole point of the per-node discovery. SkyRL backend env (`NCCL_IB_HCA`, debug) for the actual
+  training runs is set in `skyrl/train/utils/utils.py` and propagated via Ray runtime_env; the `*_SOCKET_IFNAME`
+  vars are NOT propagated (they ride the per-node raylet env from `ray start`).
 
 ---
 
@@ -306,7 +359,7 @@ for an existing cluster on Ray ≥ 2.48):
 ```bash
 export RAY_RUNTIME_ENV_HOOK=ray._private.runtime_env.uv_runtime_env_hook.hook
 cd /home/charlie_key/SkyRL
-RAY_ADDRESS=$HEAD_IP:$RAY_PORT NUM_GPUS=8 LOGGER=console NCCL_IB_HCA=mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 \
+RAY_ADDRESS=$HEAD_IP:$RAY_PORT NUM_GPUS=8 LOGGER=console NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 \
 NCCL_SOCKET_IFNAME=enp2s0 GLOO_SOCKET_IFNAME=enp2s0 \
   bash examples/train/gsm8k/run_gsm8k.sh \
     trainer.placement.policy_num_nodes=2 trainer.placement.critic_num_nodes=2 trainer.placement.ref_num_nodes=2 \

@@ -386,17 +386,26 @@ class MegatronStrategy(DistributedStrategy):
         if scheduler and load_lr_scheduler_states:
             sharded_state_dict["lr_scheduler"] = scheduler.state_dict()
 
-        if io.is_cloud_path(ckpt_dir):
-            state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
+        if not self.is_lora:
+            if io.is_cloud_path(ckpt_dir):
+                state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
+            else:
+                # Load from local filesystem with full parallel strategy.
+                load_strategy = get_default_load_sharded_strategy(ckpt_dir)
+                load_strategy = FullyParallelLoadStrategyWrapper(
+                    load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
+                )
+                state_dict = dist_checkpointing.load(
+                    sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
+                )
         else:
-            # Load from local filesystem with full parallel strategy.
-            load_strategy = get_default_load_sharded_strategy(ckpt_dir)
-            load_strategy = FullyParallelLoadStrategyWrapper(
-                load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
-            )
-            state_dict = dist_checkpointing.load(
-                sharded_state_dict=sharded_state_dict, checkpoint_dir=ckpt_dir, sharded_strategy=load_strategy
-            )
+            # LoRA resume (charlie 2026-06-09): the policy ckpt dir holds adapter_*.pt (loadable via
+            # torch.load in _load_lora_adapters) plus an optimizer dist-checkpoint that is NOT a valid
+            # standalone torch_dist checkpoint (the LoRA save path doesn't land a .metadata, so
+            # dist_checkpointing.load -> verify_checkpoint raises "not a distributed checkpoint"). Skip the
+            # dist load entirely and warm-start: restore the trained adapters, reinit optimizer/LR/RNG.
+            # global_step + dataloader position are restored separately from trainer_state.pt/data.pt.
+            state_dict = {}
 
         if not self.is_lora:
             # Load the model, optimizer, and scheduler state dicts.
@@ -407,15 +416,16 @@ class MegatronStrategy(DistributedStrategy):
             self.print("Loaded model state dict.")
         else:
             self._load_lora_adapters(unwrapped_model, ckpt_dir)
+            self.print("LoRA resume: loaded adapters; optimizer/LR/RNG warm-started (reinitialized).")
 
-        if optimizer and load_optimizer_states:
+        if optimizer and load_optimizer_states and not self.is_lora:
             assert (
                 "optimizer" in state_dict
             ), f"Optimizer state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             optimizer.load_state_dict(state_dict["optimizer"])
             self.print("Loaded optimizer state dict.")
 
-        if scheduler and load_lr_scheduler_states:
+        if scheduler and load_lr_scheduler_states and not self.is_lora:
             assert (
                 "lr_scheduler" in state_dict
             ), f"LR scheduler state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
