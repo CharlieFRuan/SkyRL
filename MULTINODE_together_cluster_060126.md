@@ -306,6 +306,7 @@ If you reserved nodes with a taint, release them:
 | all-reduce bench "succeeds" instantly with **no result table** | upstream bug: `__main__` never calls `run()`; or block-buffered stdout | ensure `run(local_rank)` is called; set `PYTHONUNBUFFERED=1` |
 | NCCL falls back to slow path / low busbw | wrong/extra HCAs selected (100G or RoCE) | pin `NCCL_IB_HCA` to the 400G NDR ports common to all nodes (skip `mlx5_0/1`) |
 | Multi-node process-group init **hangs** at `init_worker_process_group` / Gloo `connectFullMesh ... Connection refused remote=[127.0.0.1]` | `*_SOCKET_IFNAME` unset or hardcoded to a NIC name that **doesn't exist on that node** (NIC differs per node) → auto-detect picks a non-routable iface / loopback | set `NCCL_SOCKET_IFNAME`/`GLOO_SOCKET_IFNAME` to the node's own routed 10.40 NIC **at `ray start`** (§3 auto-detect). NOT a single cluster-wide value |
+| `uv run --extra megatron --isolated ...` fails building `transformer-engine-torch` with `fatal error: cudnn.h: No such file or directory` (then, after fixing that, `nccl.h`) | Transformer Engine has no prebuilt wheel for this exact torch/CUDA tag, so it builds from source. `CUDA_HOME=/usr/local/cuda` only adds `/usr/local/cuda/include`; on these nodes cuDNN/NCCL headers come from Python NVIDIA wheels under `.venv/lib/python3.12/site-packages/nvidia/.../include` | export `CPATH`, `LIBRARY_PATH`, and `LD_LIBRARY_PATH` for the wheel-provided cuDNN/NCCL dirs before warming/building the megatron env (see §10). Once built, uv reuses the cached wheel |
 | Mid-run crash: `cleanup_old_checkpoints ... FileNotFoundError: .../session_*/logs/worker-*.out`, or relaunch fails `Can't find node_ip_address.json ... a ray instance hasn't started` | a `/tmp` reaper deleted the **stale (multi-day) Ray session dir** out from under the live cluster (logs + `node_ip_address.json` gone) → zombie cluster | **restart Ray into a fresh session**: `ray stop` on all nodes (+ `pkill -9 -x raylet gcs_server`), then `ray start --head` again + rejoin workers. A fresh session resets the reap clock. Not disk-full and not a training bug |
 | `IBV_WC_RETRY_EXC_ERR(12)` / `ncclRemoteError` appearing **mid-training** (not at startup), often at the backward all-reduce | a specific IB HCA is physically down/degraded on one node (e.g. `Polling`/`10 Gb` instead of `LinkUp`/`400`) and NCCL auto-selected it | `ibstat`/§1 across all nodes; **drop the bad port from `NCCL_IB_HCA`** (or repair it). Don't fall back to TCP (`NCCL_IB_DISABLE=1`) unless you must — it's ~slow |
 | Repeated `Failed to establish connection to the metrics exporter agent` | Ray prometheus/metrics agent only | benign — ignore |
@@ -358,6 +359,29 @@ on remote workers:
    ssh n2 'uv run --directory /home/charlie_key/SkyRL --isolated --extra fsdp python -c "import skyrl, skyrl.train, ray, torch, vllm"'
    ```
    (Module is `skyrl` / `skyrl.train` — there is no top-level `skyrl_train`.)
+
+3. **If warming `--extra megatron`, include the Python-wheel cuDNN/NCCL headers.** On a cold cache,
+   `transformer-engine-torch==2.11.0` first guesses a prebuilt wheel URL for the exact torch/CUDA tag
+   (`torch2.11.0+cu128` here). That URL 404s, so it builds from source. The source build includes
+   `ATen/cudnn/cudnn-wrapper.h`, which needs plain `<cudnn.h>`, and later Transformer Engine headers
+   include `nccl.h`. Those headers are present, but in the Python NVIDIA wheels, not in
+   `/usr/local/cuda/include`; setting only `CUDA_HOME=/usr/local/cuda` is not enough.
+
+   Build/warm once per node with the include and library paths exported:
+   ```bash
+   cd /home/charlie_key/SkyRL
+   export NVIDIA_SITE=$PWD/.venv/lib/python3.12/site-packages/nvidia
+   export CPATH=$NVIDIA_SITE/cudnn/include:$NVIDIA_SITE/nccl/include${CPATH:+:$CPATH}
+   export LIBRARY_PATH=$NVIDIA_SITE/cudnn/lib:$NVIDIA_SITE/nccl/lib${LIBRARY_PATH:+:$LIBRARY_PATH}
+   export LD_LIBRARY_PATH=$NVIDIA_SITE/cudnn/lib:$NVIDIA_SITE/nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+   uv run --extra megatron --isolated python -c "import transformer_engine; import transformer_engine_torch"
+   ```
+
+   After this succeeds, the exact command without those exports should reuse uv's cached
+   `transformer-engine-torch` wheel:
+   ```bash
+   uv run --extra megatron --isolated python -c "import transformer_engine"
+   ```
 
 Then enable the uv hook and launch the driver from the project dir (this is the SkyRL-documented path
 for an existing cluster on Ray ≥ 2.48):
