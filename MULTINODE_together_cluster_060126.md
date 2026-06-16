@@ -42,6 +42,9 @@ NUM_NODES=2
 PROJECT=/home/charlie_key/SkyRL
 VENV=$PROJECT/.venv
 # Same absolute paths must exist on EVERY node.
+# Keep Ray's session/spill dirs OFF the 93G root (/tmp) — put them on the big
+# /home (or /scratch) array. See §11. Must be exported on every `ray start`.
+RAY_TMP=/home/charlie_key/ray_tmp
 ```
 
 SSH config (`~/.ssh/config`) — we are already inside the cluster network, so connect node-to-node
@@ -212,12 +215,14 @@ HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9
 # HEAD (this node)
 cd $PROJECT
 IFACE=$(ip -o -4 addr show | awk '$4 ~ /^10\.40\./ {print $2; exit}')   # this node's routed NIC
-NCCL_IB_HCA=$HCA NCCL_SOCKET_IFNAME=$IFACE GLOO_SOCKET_IFNAME=$IFACE \
+NCCL_IB_HCA=$HCA NCCL_SOCKET_IFNAME=$IFACE GLOO_SOCKET_IFNAME=$IFACE TMPDIR=$RAY_TMP RAY_TMPDIR=$RAY_TMP \
   $VENV/bin/ray start --head --node-ip-address=$HEAD_IP --port=$RAY_PORT --num-gpus=$GPUS_PER_NODE --dashboard-host=0.0.0.0
 
 # WORKER — IFACE is auto-detected ON THE WORKER (may be enp1s0, not enp2s0!). PERSISTENT session (--block).
+# TMPDIR/RAY_TMPDIR keep the worker's Ray session dir off its root disk too (§11).
 ssh n2 'IFACE=$(ip -o -4 addr show|grep " 10.40"|awk "{print \$2}"|head -1); \
   NCCL_IB_HCA='"$HCA"' NCCL_SOCKET_IFNAME=$IFACE GLOO_SOCKET_IFNAME=$IFACE \
+  TMPDIR=/home/charlie_key/ray_tmp RAY_TMPDIR=/home/charlie_key/ray_tmp \
   /home/charlie_key/SkyRL/.venv/bin/ray start --address=10.40.16.194:6379 \
   --node-ip-address=10.40.58.131 --num-gpus=8 --block' > ray_worker.log 2>&1 &
 # (verify each node's raylet got the right NIC:  tr '\0' '\n' </proc/$(pgrep -x raylet)/environ | grep SOCKET_IFNAME )
@@ -377,3 +382,30 @@ attached), so the head saw only 8 GPUs. Starting the daemons from the synced env
 `uv run`, bring up the *cluster* via the `.venv/bin/ray` route (one-time `uv sync`) but still **launch
 the job with `uv run --isolated`** — the two are independent. (`uv sync` for the daemons is not the same
 as managing a `.venv` for the job env.)
+
+---
+
+## 11. Keep Ray + SkyRL logs OFF the 93G root (`/tmp`)
+
+The root FS `/` (`/dev/vda2`) is **only 93G** on these nodes; `/home` and `/scratch` are the big
+~7TB `/dev/md0` array. Two things default to `/tmp` (root) and will fill it / crash the run:
+
+1. **Ray session + spill dir** → defaults to `/tmp/ray`. Each Ray session also spills the object
+   store and (if the uv runtime-env hook is active) a copy of the working dir there. Ray derives this
+   from `tempfile.gettempdir()`, so it honors **`TMPDIR`** (and **`RAY_TMPDIR`**). Export both to a
+   `/home` path **on every `ray start`** (head + workers) — see §0 (`RAY_TMP`) and §5. The worker's
+   value rides the per-node `ray start` env (like `*_SOCKET_IFNAME`); it is not propagated for you.
+2. **SkyRL infra logs** (`vLLM`/worker stdout, `infra-*.log`) → controlled by the
+   **`trainer.log_path`** config (default `/tmp/skyrl-logs`). Override it on the driver command line:
+   `trainer.log_path=/home/charlie_key/skyrl-logs`. (The `shiyi_glm47_flash_fully_async.sh` script
+   sets this via its `LOG_PATH` var.)
+
+Quick check after launch — both should live under `/home`, and `/` should stay flat:
+```bash
+du -sh /home/charlie_key/ray_tmp /home/charlie_key/skyrl-logs ; df -h / | tail -1
+ls -d /tmp/ray 2>/dev/null && echo "WARNING: Ray still using /tmp/ray — TMPDIR not set at ray start"
+```
+
+> Bonus (single-node `uv run` tinker/runs): `export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0` stops Ray from
+> shipping the 13G `.venv` working-dir into the session dir on every launch. Not needed for the
+> `.venv/bin/python` multi-node path (§5–6) since that doesn't trigger the uv hook at all.
