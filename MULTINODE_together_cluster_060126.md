@@ -167,9 +167,23 @@ multi-node process-group init will hang. Confirm NCCL picks IB in logs:
 
 ## 4. Sanity check: internode all-reduce bandwidth
 
-Uses `all_reduce_bench.py` (standard `torch.distributed.run`). Two upstream gotchas were fixed in our
-copy: it hardcoded `FI_PROVIDER=efa` (AWS-only — removed) and was **missing the `run(local_rank)`
-call** in `__main__` (added). If you grab a fresh copy, re-apply both.
+Uses `all_reduce_bench.py` (standard `torch.distributed.run`), now at
+**`/home/charlie_key/SkyRL/all_reduce_bench.py`** (moved under the repo; replicate per node — `/home`
+is node-local). Two upstream gotchas were fixed in our copy: it hardcoded `FI_PROVIDER=efa`
+(AWS-only — removed) and was **missing the `run(local_rank)` call** in `__main__` (added). If you
+grab a fresh copy, re-apply both.
+
+> **Focused per-HCA / per-pair tester:** to check *which* IB rail is bad between *which* two nodes,
+> use `SkyRL/ib_hca_repro/ib_pair_test.sh` (auto-detects each node's routed NIC, so it works for n4's
+> `enp1s0` too). It runs a 2-node NCCL all_reduce over a chosen `NCCL_IB_HCA` set and prints PASS/FAIL:
+> ```bash
+> cd /home/charlie_key/SkyRL/ib_hca_repro
+> bash ib_pair_test.sh mlx5_3 head:10.40.16.194 n4:10.40.40.19            # one rail (FAIL if dead)
+> bash ib_pair_test.sh mlx5_2,mlx5_3,...,mlx5_9 head:10.40.16.194 n4:10.40.40.19 6061 1 10 8  # 8 GPUs/node
+> ```
+> **Use `nproc_per_node=8` (the last arg) to catch a degraded rail.** With 1 GPU/node NCCL only uses
+> GPU0's local rail, so a single-bad-rail mixed into an 8-rail set *passes* a 1-GPU test but *fails* the
+> 8-GPU test (the GPU affinitized to the bad rail hits it) — which is what kills real 8-GPU/node training.
 
 Launcher (`run_bench.sh`) — note **real IPs** and `--local_addr` per node:
 
@@ -182,7 +196,7 @@ export NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9 NCCL_
 exec /home/charlie_key/SkyRL/.venv/bin/python -u -m torch.distributed.run \
   --nnodes=2 --node_rank="$NODE_RANK" --nproc_per_node=8 \
   --rdzv_backend=static --master_addr=10.40.16.194 --master_port=6000 --local_addr="$LOCAL_ADDR" \
-  /home/charlie_key/all_reduce_bench.py "$@"
+  /home/charlie_key/SkyRL/all_reduce_bench.py "$@"
 ```
 
 Run **both** ranks as **persistent background processes** (rank0 on head, rank1 on worker) so neither
@@ -327,6 +341,16 @@ If you reserved nodes with a taint, release them:
 - `m8htz`'s fabric manager was **broken (failed 2026-05-27) but has since been repaired** — it ran the full
   4-node job fine. Always re-check `nvidia-fabricmanager`/`ibstat` per §1 before trusting any node; health
   changes over time (5q745's `mlx5_2/mlx5_3` were also down for a while, then fixed).
+- **(2026-06-16) 5q745's `mlx5_3` is FLAPPING** — observed at **10 Gb/s SDR** (~17:00) then back to **400
+  NDR** (~18:35); it oscillates over minutes and intermittently fails NCCL QP setup. `mlx5_2` recovered.
+  While it's down, the full `mlx5_2..9` set FAILS at 8 GPUs/node (`IBV_WC_RETRY_EXC_ERR(12) hca mlx5_3`);
+  while it's up the same test PASSES — so the live NCCL repro is intermittent (failure is at QP setup, not
+  per-transfer). This caused the silent `SYSTEM_ERROR` worker kills at the inter-step weight-sync in the
+  Qwen3.6 35B runs (they landed in a down-window). **Catch the flap deterministically with
+  `ib_hca_repro/ib_watch.sh`** (polls link rate; no GPUs needed); reproduce the NCCL impact with
+  `ib_hca_repro/ib_check.sh` (run in a loop). **Workaround applied:** `NCCL_IB_HCA` in
+  `skyrl/train/utils/utils.py` drops `mlx5_3` (`mlx5_2,mlx5_4..9`, 7 rails). Real fix: service 5q745's
+  `mlx5_3` (cable/transceiver/switch port), then restore the 8-rail set once `ib_watch.sh` stays 400 NDR.
 - Reserve a node from TCLI scheduling with a `NoSchedule` taint (TCLI's `_is_valid_gpu_node` skips tainted
   nodes): `kubectl taint nodes <node> reserved-by=<you>:NoSchedule`; release with the trailing `-`.
 - Found a fresh node? Run §1 (fabric + `ibstat` 400G ports + `ip addr` routed NIC) **before** adding it —

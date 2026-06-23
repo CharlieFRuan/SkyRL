@@ -669,3 +669,183 @@ EVIDENCE: (a) standalone n3 probe: default resolved to FULL_AND_PIECEWISE, 7566 
 generate=221.7s, GPU ~59GB/0.7util (no OOM), 0 crashes — i.e. ~identical to FULL_DECODE_ONLY (step1 ~1009s,
 gen 217s). => default and FULL_DECODE_ONLY are effectively equivalent here. We still PIN FULL_DECODE_ONLY as
 the conservative/memory-leaner choice (captures only decode graphs), but the default is NOT broken.
+
+### 2026-06-16 — TASK: test CP=2 + seq packing (PR #1769) on 4 nodes, Qwen3.6-35B-A3B, NO LoRA
+Script: /home/charlie_key/SkyRL-remote/examples/train/megatron/run_megatron_dapo_qwen3.5_35b_a3b.sh (user set knobs).
+SkyRL-remote = commit bbb0bc1f "[megatron] Add seq packing support for qwen3.5 (#1769)" on main.
+Knobs: MODEL Qwen3.6-35B-A3B, 4 nodes, TP4/PP1/CP2/EP8, enforce_eager=false (no cudagraph_mode->vLLM default
+FULL_AND_PIECEWISE), gdn_prefill=triton, wandb, ckpt_interval=5, run_name dapo_qwen3_6..._seqPacking_..cp2..
+Cadence: 15min until 2 steps trained, then 45min. GH_TOKEN in ~/.bashrc. (Prior belief: CP>1 needs sample
+packing + GDN didn't support packing -> PR #1769 is meant to FIX exactly this.)
+KEY SETUP FACTS:
+- /home is NODE-LOCAL. SkyRL-remote is ONLY on head. SkyRL/.venv exists on ALL nodes (proven megatron env).
+- HEAD SkyRL/.venv imports skyrl from /home/charlie_key/SkyRL-remote/skyrl (editable -> PR code).
+- PR #1769 changed ONLY .py/.sh (NO pyproject/uv.lock) => deps unchanged => REUSE SkyRL/.venv + overlay PR
+  source via PYTHONPATH=/home/charlie_key/SkyRL-remote (no 20-min venv rebuild needed).
+- Ray is DOWN (no gcs/raylet). Must restart on all 4 nodes.
+PLAN: (1) rsync SkyRL-remote code -> n2,n4,m8htz (excl .venv/.git). (2) restart Ray on 4 nodes via
+SkyRL/.venv/bin/ray with PYTHONPATH=/home/charlie_key/SkyRL-remote + per-node IFACE (head/n2/m8htz=enp2s0,
+n4=enp1s0), num-gpus=8, head 10.40.16.194:6379. (3) launch: cd SkyRL-remote; PYTHONPATH=$PWD + SkyRL/.venv
+python -m examples.train.algorithms.dapo.main_dapo with the script's args (or edit script's `uv run` line ->
+SkyRL/.venv/bin/python + run). (4) success = no "context parallel only supported with sample packing" error,
+sync_weights ok, steps complete with CP=2+packing. Nodes reserved: 5q745,77pcc(n2),8vnx2(n4),m8htz.
+
+### CP=2 test: init crash #1 -> config fix (2026-06-16 07:46)
+CP=2 run crashed at init_model on all workers: AssertionError "Qwen3-VL model only supports context parallelism
+with calculate_per_token_loss enabled". Fix: relaunch with override (via script $@):
+trainer.policy.megatron_config.transformer_config_kwargs.calculate_per_token_loss=True. (Setup: PR#1769 code on
+all 4 nodes via PYTHONPATH=/home/charlie_key/SkyRL-remote + SkyRL/.venv; ray restarted; script uv-run line ->
+SkyRL/.venv/bin/python.)
+
+### PR #1769 CP+seq-packing test on Qwen3.6-35B-A3B — FINDING (2026-06-16 ~07:55): routing gate fails
+Setup OK: PR code (bbb0bc1f) on all 4 nodes via PYTHONPATH overlay on SkyRL/.venv; ray restarted; reuses
+proven megatron venv (PR changed no deps).
+RESULT: both CP=2 and CP=1 (+ seq packing, language_model_only=True) CRASH at init_model:
+  - CP=2: AssertionError "Qwen3-VL model only supports context parallelism with calculate_per_token_loss enabled"
+  - CP=1: ValueError "remove_microbatch_padding=True not supported for models that pack inside their own
+    forward (Qwen3VLModel)... double-packs/corrupts GatedDeltaNet cu_seqlens. Set language_model_only=True OR
+    remove_microbatch_padding=False."
+ROOT CAUSE: model builds as Qwen3VLModel even with language_model_only=True. The routing gate
+megatron_worker.py:367 `if language_model_only and maybe_force_qwen35_text_bridge(bridge, hf_config)` returned
+FALSE (its log line never printed). maybe_force (model_bridges.py:147) matches hf_config.architectures against
+{Qwen3_5MoeForConditionalGeneration, Qwen3_5ForConditionalGeneration}. config.json TOP-LEVEL architectures =
+['Qwen3_5MoeForConditionalGeneration'] (MATCHES), but the gate reads hf_config = update_model_config(
+hf_config_original,...) which evidently does NOT expose that arch (text_config.architectures is None) -> gate
+False -> VL path -> fail. => PR #1769's language_model_only->GPTModel routing does not engage for
+Qwen3.6-35B-A3B as-is. No config-only workaround tests packing (other remedy = remove_microbatch_padding=False
+disables the very packing under test). FIX is on the PR side (make maybe_force read top-level architectures /
+handle this config), OR test with a model whose loaded hf_config.architectures matches. Cluster left idle
+(Ray up w/ PR code on PYTHONPATH, 4 nodes reserved). Loop stopped — relaunching as-is is deterministically futile.
+
+### PR#1769 Qwen3.6 routing — REFINED (2026-06-16): gate logic is CORRECT in isolation
+Repro (exact path AutoConfig+update_model_config with real bos/eos/pad override): hf_config.architectures =
+["Qwen3_5MoeForConditionalGeneration"] survives, maybe_force_qwen35_text_bridge returns TRUE and rewrites
+bridge arch -> Qwen3_5MoeTextForCausalLM. So language_model_only IS set+threaded AND the gate SHOULD route.
+Yet run builds Qwen3VLModel (wrapper model_packs_sequences_internally(actor_module)=True -> error) and the
+"forcing..." log is absent. Hypothesis: rewrite is ineffective because AutoBridge.from_hf_pretrained already
+dispatched the VL model class; rewriting bridge.hf_pretrained.config.architectures afterward does not re-select
+the model -> to_megatron_provider still builds Qwen3VLModel. INSTRUMENTED megatron_worker.py gate w/ DBG_GATE
+prints (lmo, hf_arch, bridge_arch before/after, forced); synced to all nodes; relaunching CP=1 to capture.
+REVERT the DBG prints after (git checkout megatron_worker.py).
+
+### PR#1769 Qwen3.6 routing — ROOT CAUSE FOUND (2026-06-16): stale megatron stack on WORKER nodes
+File-based instrumentation (/tmp/dbg_gate.txt) of the gate in init_configs (megatron_worker.py ~L367) showed:
+  HEAD (10.40.16.194): forced=True  -> bridge arch rewritten to Qwen3_5MoeTextForCausalLM (gate WORKS)
+  WORKERS n2/n4/m8htz: forced=False -> bridge stays Qwen3_5MoeForConditionalGeneration -> builds Qwen3VLModel -> crash
+Same inputs everywhere (lmo=True, hf_arch=[Qwen3_5MoeForConditionalGeneration]). model_bridges.py is byte-identical
+(md5) across nodes. The divergence: model_bridges.py wraps its real maybe_force_qwen35_text_bridge in try/except
+ImportError with a stub that ALWAYS returns False. The try block imports
+  megatron.bridge.models.qwen.qwen35_bridge  ->  OK on head, ModuleNotFoundError on ALL 3 workers.
+Versions: head = megatron-bridge 0.6.0+91a15142 / megatron-core 0.19.0+71e418ea7 (has qwen35_bridge.py +
+experimental_attention_variant_module_specs). Workers = megatron-bridge 0.5.0+8382dc34 / megatron-core 0.16.0rc0
+(NO qwen35_bridge.py). TE 2.11.0 on all. => CONCLUSION: PR #1769 GATE LOGIC IS CORRECT; the blocker is an
+ENVIRONMENT SKEW: head venv was upgraded (core 0.16->0.19, bridge 0.5->0.6) but the 3 worker node-local venvs
+were not. Prior 4-node runs worked only because they did not use language_model_only/packing. FIX = bring worker
+megatron stack up to head (sync megatron/core + megatron/bridge + dist-info, or reinstall). Reverting DBG edits next.
+
+### PR#1769 Qwen3.6 — FIX VERIFIED (2026-06-16 16:23): forced=True on ALL 4 nodes after syncing
+megatron core0.19+bridge0.6+training to workers. remove_microbatch_padding init crash GONE; model builds as
+GPTModel (text) on every rank; CP=1 + sequence packing path now active. Run then died at step0 on RESUME:
+CheckpointingException ".../global_step_75/policy is not a distributed checkpoint" -- stale step-75 ckpt from a
+prior NON-packing run sharing ckpt_path (script ckpt_path=dapo_qwen3_5_...tp4pp1cp1ep8etp1, lacks 3_6/seqPacking
+suffix; resume_mode=latest picked it up). Known .metadata-drop ckpt bug. Relaunching with resume_mode=none +
+fresh isolated ckpt_path/export_path (dapo_qwen3_6_35b_a3b_seqPacking_*) via $@; NOT deleting the step-75 artifact.
+Debug instrumentation reverted + resynced to all nodes.
+
+### PR#1769 Qwen3.6 — CP+PACKING TEST RESULT: *** PASS *** (2026-06-16 16:44)
+Step 0 completed FULLY and CLEANLY with CP=1 + sequence packing on the GPTModel GDN path:
+  generate 225.8s | policy_train 395.2s | step total 876.9s. NO cu_seqlens corruption, NO NaN, NO shape error.
+=> CONCLUSION: sequence packing (remove_microbatch_padding) + CP work for Qwen3.6-35B-A3B after PR #1769,
+   GIVEN the worker megatron stack is upgraded to core0.19/bridge0.6 (the fix done earlier this session).
+Then crashed at START of step 1: ActorDiedError / SYSTEM_ERROR "connection error code 2, End of file" on a
+MegatronPolicyWorkerBase (n4 PID 1166253) + a head worker. NO Python traceback => external SIGKILL/SIGSEGV.
+Host RAM ruled OUT as cause: nodes have 1763GB RAM, ~1660GB free, swap=0 (offload nowhere near limit).
+No dmesg/journal OOM line visible (may be priv-restricted). GPUs idle post-crash; ray cluster healthy 4node/32GPU.
+Likely a transient segfault/CUDA/NCCL hiccup at the step0->1 boundary. ACTION: relaunching once identically
+(fresh isolated ckpt path, resume_mode=none) to test transient-vs-deterministic. If it recurs at same boundary,
+it is deterministic -> pause for user (memory/sync config decision: TP8, gpu_mem 0.5, offload_fraction<1).
+
+### PR#1769 Qwen3.6 — step-1 crash is DETERMINISTIC (2026-06-16 17:04): reproduced at SAME step0->1 boundary
+Second identical run: step0 clean again (generate 216s, policy_train 262.6s, step 621s) then ActorDiedError /
+SYSTEM_ERROR at step 1 start, SAME nodes (n4 10.40.40.19 + head). Dead MegatronPolicyWorkerBase logs have NO
+traceback / NO CUDA/NCCL error -> clean external SIGKILL/SIGSEGV; "empty_cuda_cache: true" logged just before.
+Host RAM ruled out (1.7TB free). => NOT the PR (packing proven twice). Prime suspect: GPU-mem peak at colocated
+inter-step transition (optimizer h2d overlap + vLLM KV realloc @ gpu_memory_utilization=0.7). Attempt #1 (bounded):
+relaunch with gpu_memory_utilization=0.5. If still dies at step1 -> present options to user (TP8 / offload_fraction<1
+/ un-disable NCCL P2P-SHM / num_engines or vllm mem). Not chasing further config guesses autonomously beyond this.
+
+### PR#1769 Qwen3.6 — gpu_mem=0.5 did NOT fix step-1 crash (2026-06-16 17:22)
+Third run (gpu_mem 0.5): step0 clean (generate 215.7s, policy_train 251.4s, step 629s) then SAME ActorDiedError /
+SYSTEM_ERROR at step1 boundary, SAME nodes (head 10.40.16.194 + n4 10.40.40.19). => vLLM KV-cache GPU pressure
+RULED OUT. Crash is in MegatronPolicyWorkerBase at the inter-step transition (optimizer offload / empty_cuda_cache),
+fires the instant step0 Finished -> worker died during step0 tail. New prime suspect: CPU optimizer-offload +
+overlap d2h/h2d path (optimizer_cpu_offload=true, overlap_cpu_optimizer_d2h_h2d=true, offload_fraction=1.0).
+Attempt #2 (final autonomous knob): disable optimizer offload (all 3 kwargs false). Distributed-opt state ~13GB/GPU
+sharded across DP8 -> fits 144GB H200 without offload. If this ALSO crashes at step1 -> STOP, hand decision to user.
+
+### PR#1769 Qwen3.6 — offload-OFF ALSO crashed at step1 (2026-06-16 17:39) -> STOPPING autonomous knob-turning
+Fourth run (optimizer offload disabled): step0 clean again (generate 214s, policy_train 248s, step 601s) then SAME
+ActorDiedError/SYSTEM_ERROR at step1 boundary. => CPU optimizer-offload RULED OUT too (along with vLLM KV mem).
+*** KEY PATTERN (all 4 crashes): the two dying MegatronPolicyWorkerBase workers are ALWAYS on head 10.40.16.194
++ n4 10.40.40.19; NEVER n2 (10.40.58.131) or m8htz (10.40.62.120). *** Step0 full 32-GPU train succeeds every
+time (so n4 compute is fine), but a worker on the head+n4 pair dies at the inter-step offload/sync/empty_cache
+transition with external SIGKILL/SIGSEGV, no python traceback, no CUDA/NCCL msg in worker logs. This points away
+from a memory-config knob and toward (a) the specific head<->n4 NCCL link/P2P during weight-sync or post-step
+cleanup, or (b) an n4-pair-specific issue. NOTE: utils.py currently DISABLES NCCL P2P/SHM (prior mitigation).
+NEXT OPTIONS FOR USER (their call): (1) un-disable NCCL P2P/SHM in utils.py; (2) drain n4, run 3-node/24-GPU to
+test the n4-pair hypothesis; (3) NCCL_DEBUG=INFO + dmesg-with-privs to catch the actual kill cause; (4) MEGATRON_TP=8.
+NOT relaunching further without user direction.
+
+### *** STEP-1 CRASH ROOT CAUSE FOUND & FIXED (2026-06-16): degraded IB HCA mlx5_3 on head ***
+The deterministic step0->1 SYSTEM_ERROR worker kills (always head 5q745 + n4, no python traceback) were NOT
+memory/PR/offload — they were a DEGRADED InfiniBand rail. Followed MULTINODE_together_cluster_060126.md §1/§4
++ used SkyRL/ib_hca_repro/. Evidence (NCCL all_reduce head<->n4, ib_pair_test.sh):
+  - ibstat: head 5q745 mlx5_3 = ACTIVE but 10 Gb/s SDR (not 400 NDR); mlx5_2 recovered; all other rails OK.
+  - mlx5_3 solo -> FAIL: IBV_WC_RETRY_EXC_ERR(12) hca mlx5_3 -> ncclRemoteError -> abort.
+  - full mlx5_2..9 @1 GPU/node -> PASS (rail affinity: GPU0 uses mlx5_2, misses mlx5_3).
+  - full mlx5_2..9 @8 GPUs/node -> FAIL on mlx5_3 (GPU5) == faithful repro of the training crash.
+  - fix mlx5_2,mlx5_4..9 (drop mlx5_3) @8 GPUs/node -> PASS.
+NCCL watchdog aborts the proc on the retry-exhaust -> Ray SYSTEM_ERROR with no traceback (matches exactly).
+FIX APPLIED: skyrl/train/utils/utils.py NCCL_IB_HCA -> "mlx5_2,mlx5_4,mlx5_5,mlx5_6,mlx5_7,mlx5_8,mlx5_9"
+(7 rails, drop mlx5_3). Real fix: service 5q745 mlx5_3 then restore 8 rails. Repro+docs: ib_hca_repro/README.md,
+MULTINODE doc §4/§9. => With this, the Qwen3.6 CP+packing DAPO run should clear step1 (all blockers now resolved:
+worker megatron stack upgraded earlier + IB rail fixed). NOTE: utils.py NCCL_IB_HCA is propagated via Ray
+runtime_env, so a NEW driver launch picks it up (no ray restart needed); a currently-running driver would not.
+
+### *** SUCCESS: Qwen3.6 CP+packing CLEARS THE STEP BOUNDARY (2026-06-16 20:42) ***
+After adding NCCL_IB_HCA="mlx5_2,mlx5_4..9" (drop flapping mlx5_3) to SkyRL-REMOTE utils.py (the driver-imported
+copy; it previously had NO NCCL_IB_HCA pin -> NCCL auto-selected mlx5_3 -> crash) + the earlier worker megatron
+stack upgrade: 4-node run dapo_qwen3_6_35b_a3b_seqPacking_ibfix cleared step0 AND the inter-step weight-sync that
+killed the 3 prior runs. Step0: generate 212.6s, policy_train 453.7s, sync_weights 34.9s, step total 837.9s;
+Training Batches Processed 1/2700; step1 generate now running. No IBV_WC/SYSTEM_ERROR. Verified worker env has
+NCCL_IB_HCA=mlx5_2,mlx5_4..9 (mlx5_3 excluded). => CP=1 + sequence packing WORK and multi-step is STABLE with the
+IB fix. Monitoring to 45-min cadence after step1 completes (2 full steps).
+
+### Qwen3.6 IB-fix run: cleared 2 FULL STEPS then crashed at step2->3 (2026-06-16 ~21:00)
+BIG progress: with mlx5_3 dropped, the run did step0 (838s) + step1 (797s) CLEANLY (prior runs died at step1).
+Then SAME silent SYSTEM_ERROR / ActorUnavailableError (Socket closed, rpc 14) at the step2->3 boundary, this time
+head(5q745) + n2 (whole block of head workers died together). NO IBV_WC/nccl error captured this time (worker .out/.err
+hold no diagnostics anyway). Post-crash: all head IB rails read 400 NDR (mlx5_3 flapped back up); RAM 1.66TB free; GPUs idle.
+*** THROUGHLINE: head node 5q745 is in ALL 5 crashes (head+n4 x4, head+n2 x1); peer rotates, 5q745 constant. ***
+mlx5_3 was its worst symptom but 5q745 IB/transport looks broadly intermittent/unstable. Options pending user decision:
+(1) 3-node run EXCLUDING 5q745 GPUs (n2/n4/m8htz, 24 GPU) to confirm/avoid the bad head; (2) relaunch 4-node as-is
+(will progress but likely intermittently re-crash on 5q745); (3) pause for infra to service 5q745. NOTE ckpt_interval=5
+so no ckpt saved yet (died at step ~2-3) -> relaunch is from scratch.
+
+### Step2->3 crash post-IB-fix = NCCL COLLECTIVE STALL, not the mlx5_3 IBV error or a packing bug (2026-06-16, infra log)
+infra-260616_202325.log on all 4 nodes: all 32 ranks hit `Watchdog caught collective operation timeout:
+WorkNCCL(SeqNum=112, OpType=ALLREDUCE, NumelIn=1, NumelOut=1, Timeout=1800000ms)` at 21:37:36 (hang began ~21:07).
+SAME SeqNum on every rank => transport STALL (all entered the 1-elem allreduce; it never completed in-network),
+NOT a control-flow desync. Last normal log 21:05:01: forward_backward microbatches_this_step=64 on dp_ranks 0/2/4/6
+(BALANCED) => NOT an uneven-microbatch packing desync. n4 `KeyError /psm_...` = benign resource_tracker teardown noise.
+=> Subtler IB-fabric failure mode (silent stall, no IBV retry-exhaust). QP-setup sweep (ib_sweep_head.sh) currently
+ALL-GREEN (head<->n2 10/10, head<->n4 10/10) -> flap intermittent & currently up; setup test cannot catch a
+mid-collective stall. Throughline still intermittent head/fabric instability. Mitigations to consider: lower NCCL
+watchdog/heartbeat timeout to fail fast (not wait 30min); NCCL_IB_TIMEOUT/NCCL_IB_RETRY_CNT tuning; or 3-node run
+excluding 5q745; root fix = infra services 5q745 fabric.
+
+### Real DAPO run w/ token-batching launched (2026-06-17 08:44): TP8/EP8/CP1, max_tokens_per_microbatch=200000
+Same DAPO script + TP8 (was TP4) + trainer.max_tokens_per_microbatch=200000 + recompute_old_logprobs_per_minibatch=True.
+Unified 4-node cluster (mlx5_3 excluded from NCCL_IB_HCA; Ray temp+logs on /home, not /tmp root). world=32 dp=4 (TP8).
+Token batching CONFIRMED working: packs real seqs to ~199000-199996 tok/microbatch (cap 200000), 24-32 seqs/mb,
+5-6 microbatches/minibatch. GPUs ~100%, NO OOM/stall/IBV. Step0 in policy_train. Driver log: out_dapo_tp8_mbs200k.log.
