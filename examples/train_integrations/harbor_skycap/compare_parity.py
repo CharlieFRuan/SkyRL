@@ -13,14 +13,17 @@ import argparse
 import collections
 import json
 import random
+import re
 import statistics as st
 from pathlib import Path
 
 
-def load_run(trials_dir: Path) -> dict:
-    """task -> list of trial records (a run normally has one per task)."""
+def load_run(trials_dir: Path, include: str = "") -> dict:
+    """task -> list of trial records (a run normally has one per task); only tasks matching ``include`` (a regex)."""
     out = collections.defaultdict(list)
     for result in trials_dir.glob("*/result.json"):
+        if include and not re.search(include, result.parent.name):
+            continue
         r = json.loads(result.read_text())
         exc = (r.get("exception_info") or {}).get("exception_type")
         reward = ((r.get("verifier_result") or {}).get("rewards") or {}).get("reward")
@@ -105,11 +108,12 @@ def describe(name: str, runs: list) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", nargs="+", action="append", required=True, metavar=("NAME", "TRIALS_DIR"))
+    ap.add_argument("--include", default="", help="only tasks whose trial dir name matches this regex")
     ap.add_argument("--split", type=int, default=0, help="split each directory into this many runs (K attempts per task); -1 detects K per directory")
     args = ap.parse_args()
     arms = {}
     for a in args.arm:
-        runs = [load_run(Path(p)) for p in a[1:]]
+        runs = [load_run(Path(p), args.include) for p in a[1:]]
         if args.split:
             # -1: each directory's own attempt count (the most common number of trials per task in it)
             ks = [args.split if args.split > 0 else collections.Counter(len(v) for v in run.values()).most_common(1)[0][0] for run in runs]
