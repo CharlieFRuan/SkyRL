@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
+import re
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -216,6 +217,11 @@ class RenderersRenderer:
                     "function": {"name": call.name, "arguments": arguments},
                 }
             )
+        if not calls and isinstance(message["content"], str) and "<function=" in message["content"]:
+            # Qwen3 coder sometimes emits `<function=...>` without its `<tool_call>` wrapper. vLLM's qwen3_coder parser
+            # (what a stock endpoint runs) still extracts those calls, so an agent behind skycap must get them too.
+            content, calls = _bare_xml_function_calls(message["content"], tools, completion_ids)
+            message["content"] = content
         if calls:
             message["tool_calls"] = calls
         return message
@@ -243,3 +249,51 @@ class RenderersRenderer:
                 stream.step(backend, int(token))
             pieces = [stream.step(backend, int(token)) or "" for token in token_ids]
         return join_pieces(pieces)
+
+
+_FUNCTION_RE = re.compile(r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL)
+_PARAMETER_RE = re.compile(r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL)
+
+
+def _bare_xml_function_calls(
+    content: str, tools: Sequence[Mapping[str, Any]] | None, completion_ids: Sequence[int]
+) -> tuple[str, list[dict[str, Any]]]:
+    """Tool calls in ``<function=N><parameter=K>V</parameter></function>`` blocks that lack ``<tool_call>``, parsed as
+    vLLM's qwen3_coder parser does: the text before the first block is the content, a parameter's value loses one
+    leading and trailing newline, and it is converted by the tool's JSON schema type (strings stay as written)."""
+    start = content.find("<function=")
+    types: dict[str, dict[str, str]] = {}
+    for tool in normalize_tools(tools) or ():
+        function = tool.get("function", tool)
+        props = ((function.get("parameters") or {}).get("properties")) or {}
+        types[function.get("name", "")] = {k: (v or {}).get("type", "string") for k, v in props.items()}
+    calls = []
+    for index, match in enumerate(_FUNCTION_RE.finditer(content[start:])):
+        body = match.group(1) if match.group(1) is not None else match.group(2)
+        name, _, rest = body.partition(">")
+        name = name.strip()
+        if not name:
+            continue
+        arguments: dict[str, Any] = {}
+        for param in _PARAMETER_RE.finditer(rest):
+            key, _, value = param.group(1).partition(">")
+            key = key.strip()
+            value = value[1:] if value.startswith("\n") else value
+            value = value[:-1] if value.endswith("\n") else value
+            kind = types.get(name, {}).get(key, "string")
+            if kind != "string":
+                try:
+                    value = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            arguments[key] = value
+        calls.append(
+            {
+                "id": tool_call_id(completion_ids, index),
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)},
+            }
+        )
+    if not calls:
+        return content, []
+    return content[:start].rstrip(), calls
