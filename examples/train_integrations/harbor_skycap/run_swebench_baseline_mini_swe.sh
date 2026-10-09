@@ -5,7 +5,8 @@
 #   BASE_URL=https://relay.example.com/base/v1 JOB_NAME=baseline-r1 bash examples/train_integrations/harbor_skycap/run_swebench_baseline_mini_swe.sh
 #
 # The endpoint must serve SERVED_MODEL_NAME with the eval's engine settings (vLLM 0.30.0, max_model_len 73728, qwen3
-# reasoning parser, qwen3_coder tool parser). Knobs: BASE_URL, API_KEY_FILE, TASKS_DIR, JOBS_DIR, JOB_NAME, N_CONCURRENT.
+# reasoning parser, qwen3_coder tool parser). Knobs: BASE_URL, API_KEY_FILE, TASKS_DIR, JOBS_DIR, JOB_NAME, N_CONCURRENT;
+# extra arguments go to `harbor run` (e.g. -k 3 for 3 attempts per task).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3.6-35b-a3b}"
@@ -30,4 +31,4 @@ exec harbor run -y -p "$TASKS_DIR" -o "$JOBS_DIR" --job-name "$JOB_NAME" -e dayt
   --ak version=2.4.6 --ak config_file="$HERE/mini_swe_agent_qwen36.yaml" \
   --ae OPENAI_API_KEY="$KEY" --ae OPENAI_API_BASE="$BASE_URL" --ae OPENAI_BASE_URL="$BASE_URL" \
   --ae MSWEA_API_KEY="$KEY" --ae MSWEA_COST_TRACKING=ignore_errors --ae LITELLM_LOCAL_MODEL_COST_MAP=True \
-  --agent-timeout-multiplier 0.6 --verifier-timeout-multiplier 0.1
+  --agent-timeout-multiplier 0.6 --verifier-timeout-multiplier 0.1 "$@"
