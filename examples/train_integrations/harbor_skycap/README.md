@@ -84,10 +84,36 @@ skycap's exposure ([skycap's README](../../../skycap/README.md#expose-a-server-t
 
 Only the harness routes are reachable that way, never the control plane. An
 installed agent gets its trajectory's route on the exposed URL in its sandbox's
-environment (`OPENAI_API_BASE`, `HOSTED_VLLM_API_BASE`, and placeholder keys);
-Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
-flight, and a call whose reply hasn't started after about 125 s fails, so use
-`external_host` for many agents or long replies.
+environment (`OPENAI_API_BASE`, `OPENAI_BASE_URL`, `HOSTED_VLLM_API_BASE`, and
+the trajectory's key) and the model `openai/<served name>`; the URL's host is
+added to `agent.extra_allowed_hosts`, for tasks whose agent phase is allowlisted.
+An installed agent without an exposure is refused. Terminus-2 keeps the server's
+own URL. A quick tunnel takes at most 200 calls in flight, and a call whose reply
+hasn't started after about 125 s fails, so use `external_host` or an HTTPS relay
+(`relay_exposure.py`: one public host routing `/skycap/<node ip>/<port>` to each
+server) for many agents or long replies.
+
+### mini-swe-agent with a thinking model
+
+mini-swe-agent acts through tool calls, so skycap answers with parsed
+`reasoning_content` and `tool_calls` (`skycap.use_raw_content` defaults per
+agent: on for Terminus-2, off for installed agents), as vLLM with a reasoning
+and a tool-call parser would. LiteLLM's `openai/` provider sends both back as
+they came, so with the thinking kept in the template
+(`skycap.chat_template_kwargs.preserve_thinking=true`,
+`skycap.thinking_retention=all`) each turn extends the last one token for token.
+A local checkout needs its renderer named (`skycap.renderer=qwen3.6`).
+
+When a prompt no longer fits `max_model_len`, skycap refuses it in OpenAI's
+words, so LiteLLM raises `ContextWindowExceededError`, mini-swe-agent exits
+non-zero and Harbor still runs the verifier. The trial stops on
+`context_length`, with the verifier's reward (0 if it didn't run).
+
+`run_swebench_eval_mini_swe.sh` evaluates without training
+(`entrypoints/main_harbor_skycap_eval.py`): every task of `data.val_data` once,
+Harbor's trial directories written as `harbor run` writes them, each trial scored
+as stock Harbor scores it, with `mini_swe_agent_qwen36.yaml` shared with the
+stock baseline.
 
 ## Records and W&B
 
@@ -155,7 +181,7 @@ What's imposed on every call:
 
 Masking is the sibling's:
 - **Timeout or failed rollout:** the whole instance is masked.
-- **Context-length stop:** trains with reward 0, unless overlong filtering is on.
+- **Context-length stop:** trains with reward 0 (an installed agent's: the verifier's), unless overlong filtering is on.
 - **Failed inside skycap** (e.g. an unattributable prompt): the trial isn't trained on.
 
 R3 (rollout routing replay) needs

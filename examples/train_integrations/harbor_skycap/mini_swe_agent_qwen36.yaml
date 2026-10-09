@@ -1,0 +1,27 @@
+# mini-swe-agent config for Qwen3.6-35B-A3B on SWE tasks, shared by the skycap run and its stock-Harbor baseline,
+# so the agent behaves the same in both. Pass it as harbor_trial_config.agent.kwargs.config_file (skycap) or
+# `--ak config_file=...` (harbor run), with mini-swe-agent pinned to 2.4.6 (agent.kwargs.version / `--ak version=2.4.6`).
+#
+# These are overrides layered on mini-swe-agent's builtin mini.yaml: Harbor runs `mini-swe-agent -c mini -c <this>`,
+# which merges the two recursively (templates and tool-calling setup come from mini.yaml).
+#
+# Sampling: the Qwen3.6 model card's SWE-bench setting (temperature 1.0, top_p 0.95, top_k 20), thinking on and kept in
+# the history (preserve_thinking). Under skycap the trainer's generator.sampling_params win over temperature/top_p/top_k/
+# min_p, and skycap's own skycap.chat_template_kwargs over chat_template_kwargs here; set them to the same values.
+# max_tokens (per turn) and any penalties are passed through as sent.
+agent:
+  step_limit: 0   # no step limit: the agent timeout bounds a trial
+  cost_limit: 0   # no cost limit (the model has no price)
+environment:
+  timeout: 600    # seconds per bash command
+model:
+  model_kwargs:
+    drop_params: true
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 8192
+    extra_body:
+      top_k: 20
+      chat_template_kwargs:
+        enable_thinking: true
+        preserve_thinking: true

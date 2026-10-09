@@ -33,7 +33,7 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
-from ..harbor_generator import HarborSkycapGenerator
+from ..harbor_generator import HarborSkycapGenerator, runs_in_sandbox
 from ..record_index import RecordLog, SkycapRecordIndex
 from ..servers import SkycapServers, exposure_for, start_servers
 
@@ -93,11 +93,26 @@ class SkycapConfig:
     """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it."""
     renderer_pool_size: int = 8
     """Renderers (tokenizer copies) each server renders prompts with in parallel."""
-    use_raw_content: bool = True
+    renderer: Optional[str] = None
+    """The ``renderers`` renderer skycap renders with (``qwen3.6``, ``qwen3``, ...). By default it is picked from
+    ``trainer.policy.model.path`` when that is a Hub name it knows; a local checkout's path needs it named."""
+    chat_template_kwargs: Dict[str, Any] = field(default_factory=dict)
+    """The chat template's options for skycap's renderer, e.g. ``{enable_thinking: true, preserve_thinking: true}``
+    for Qwen3.6 with its thinking kept in the history. skycap renders every prompt itself, so a harness's own
+    ``chat_template_kwargs`` (in ``extra_body``) don't apply."""
+    thinking_retention: Optional[str] = "all"
+    """What skycap's renderer does with earlier turns' thinking. ``all`` (default) keeps it: each turn extends the
+    previous prompt and completion token for token. ``tool_cycle`` drops it once a new user query arrives, as
+    Qwen's template does by default, re-rendering the prompt. None follows ``chat_template_kwargs`` (Qwen3.6's
+    ``preserve_thinking``); an explicit value that contradicts them is refused."""
+    use_raw_content: Optional[bool] = None
     """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
-    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    replies every replayed turn would lose its reasoning, edit history and fork the graph.
+    None (default) picks per agent: on for one that calls the model from this process (Terminus-2), off for
+    one installed in its sandbox (mini-swe-agent), which acts through tool calls and needs them parsed, as a
+    vLLM with reasoning and tool-call parsers would; its LiteLLM (``openai/``) replays ``reasoning_content``."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -141,7 +156,10 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
             "min_p": sampling.min_p,
         },
         "sampling_mask": ie.enable_return_sample_support_set,
-        "use_raw_content": cfg.skycap.use_raw_content,
+        "use_raw_content": _use_raw_content(cfg),
+        "chat_template_kwargs": dict(cfg.skycap.chat_template_kwargs) if cfg.skycap.chat_template_kwargs else None,
+        "thinking_retention": cfg.skycap.thinking_retention,
+        "renderer_name": cfg.skycap.renderer,
         "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
@@ -158,6 +176,24 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
     )
+
+
+def _use_raw_content(cfg: Any) -> bool:
+    """``skycap.use_raw_content``, by default on unless the agent runs inside its sandbox."""
+    if cfg.skycap.use_raw_content is not None:
+        return bool(cfg.skycap.use_raw_content)
+    return not runs_in_sandbox(cfg.harbor_trial_config.get("agent") or {})
+
+
+def _check_agent_reach(cfg: Any) -> None:
+    """An agent installed in its sandbox reaches skycap only through an exposure: refuse to start without one."""
+    agent = cfg.harbor_trial_config.get("agent") or {}
+    if cfg.skycap.exposure.type == "none" and runs_in_sandbox(agent):
+        raise ValueError(
+            f"Harbor agent {agent.get('name') or agent.get('import_path')!r} calls the model from inside its "
+            "sandbox, which can't reach skycap's own URL: set skycap.exposure.type (external_host, cloudflare, "
+            "or an Exposure class such as relay_exposure:RelayPathExposure)"
+        )
 
 
 def _require_api_key(cfg: Any) -> bool:
@@ -228,6 +264,7 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
     _exposure(cfg)
+    _check_agent_reach(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)

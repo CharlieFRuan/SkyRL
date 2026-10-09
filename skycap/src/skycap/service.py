@@ -58,11 +58,19 @@ def build_backend(
     sampling_mask: bool = False,
     logprobs_mode: str = "processed_logprobs",
     use_raw_content: bool = False,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+    thinking_retention: str | None = "all",
+    renderer_name: str | None = None,
 ) -> Backend:
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
-    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default.
+    (e.g. a test's). ``engine`` is the engine's wire, vLLM's by default. The rest configure the
+    ``renderers`` renderer (``RenderersRenderer``): ``chat_template_kwargs`` as the chat template's own
+    options (``{"enable_thinking": True}``); ``thinking_retention``, its policy for earlier turns' thinking
+    (``"all"`` keeps it, so each turn extends the last prompt and completion token for token;
+    ``"tool_cycle"`` drops it once a new user query arrives; None follows the template's knobs); and
+    ``renderer_name``, the renderer to use when the tokenizer's name doesn't pick one (a local checkout).
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -75,7 +83,13 @@ def build_backend(
     if renderer is None:
         from skycap.tokens.renderer import RenderersRenderer
 
-        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size)
+        renderer = RenderersRenderer(
+            tokenizer,
+            size=renderer_pool_size,
+            thinking_retention=thinking_retention,
+            chat_template_kwargs=chat_template_kwargs,
+            renderer=renderer_name,
+        )
     return TokensBackend(
         upstream_url,
         renderer,
@@ -121,6 +135,9 @@ class CaptureService:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        chat_template_kwargs: Mapping[str, Any] | None = None,
+        thinking_retention: str | None = "all",
+        renderer_name: str | None = None,
         record_dir: str | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
@@ -147,6 +164,9 @@ class CaptureService:
             sampling_mask=sampling_mask,
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
+            chat_template_kwargs=chat_template_kwargs,
+            thinking_retention=thinking_retention,
+            renderer_name=renderer_name,
         )
         self.server = CaptureServer(
             backend,

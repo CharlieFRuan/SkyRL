@@ -8,7 +8,9 @@
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
   discarded reply asked again for (mini-swe-agent's format-error retry), a
-  timeout, a crash, or a sandbox that times out starting on the first attempt
+  timeout, a crash, an installed agent that exits non-zero after skycap refused
+  its prompt as too long (``overflow``, verified; ``overflow_unverified``, not), or
+  a sandbox that times out starting on the first attempt
   (``slow_start``; "first" counts every trial of that task path since
   ``FakeTrial.configs`` was reset, so a test runs one such trial). Results carry Harbor's phase timings: the sandbox takes
   ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
@@ -32,6 +34,8 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
 
 START, END, NL = 1, 2, 3
 SETUP, AGENT, VERIFY, START_TIMEOUT = 5.0, 10.0, 2.0, 600.0
+#: Characters of the message an ``overflow`` trial sends, more than its skycap's ``max_model_len`` holds.
+OVERFLOW = 4096
 EPOCH = datetime(2026, 1, 1)
 LAYERS, EXPERTS_PER_TOKEN, TOP_K = 2, 2, 3
 
@@ -72,7 +76,9 @@ class FakeRenderer:
             reused=len(previous_prompt) + len(previous_completion),
         )
 
-    def parse(self, completion_ids: Sequence[int], tools: Any) -> dict[str, Any]:
+    def parse(
+        self, completion_ids: Sequence[int], tools: Any, prompt_ids: Sequence[int] | None = None
+    ) -> dict[str, Any]:
         return {"role": "assistant", "content": decode([t for t in completion_ids if t != END])}
 
     def stop_token_ids(self) -> list[int]:
@@ -207,6 +213,17 @@ class FakeTrial:
             history.append(await chat(session, history))
             if script == "timeout":
                 return verified(0.0, "AgentTimeoutError")
+            if script.startswith("overflow"):
+                # The next prompt doesn't fit: skycap refuses it, the agent's client raises, and it exits non-zero.
+                # Harbor still runs the verifier on what the agent left, unless it couldn't.
+                body = {"model": "policy", "messages": [*history, {"role": "user", "content": "x" * OVERFLOW}]}
+                async with session.post(f"{base_url}/chat/completions", json=body, headers=headers) as response:
+                    assert response.status == 400, await response.text()
+                result = verified(1.0)
+                result.exception_info = SimpleNamespace(exception_type="NonZeroAgentExitCodeError")
+                if script == "overflow_unverified":
+                    result.verifier_result = None
+                return result
             history += [{"role": "user", "content": "ok"}]
             if script == "discard":
                 # As mini-swe-agent on a format error: the reply is dropped from the history and the

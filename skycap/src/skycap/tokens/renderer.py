@@ -47,7 +47,12 @@ class TokenRenderer(Protocol):
         tools: Sequence[Mapping[str, Any]] | None,
     ) -> Rendered | None: ...
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]: ...
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]: ...
 
     def stop_token_ids(self) -> list[int]: ...
 
@@ -80,12 +85,29 @@ def tool_call_id(completion_ids: Sequence[int], index: int) -> str:
     return f"call_{digest[:20]}_{index}"
 
 
+def renderer_config(name: str | None, thinking_retention: str | None) -> Any:
+    """The ``renderers`` config for the renderer ``name`` (None or ``"auto"``: picked from the tokenizer's name)."""
+    from renderers import AutoRendererConfig, config_from_name
+
+    retention = {} if thinking_retention is None else {"thinking_retention": thinking_retention}
+    default = None if name is None else config_from_name(name)
+    if default is None:
+        return AutoRendererConfig(**retention)
+    return type(default)(**retention)
+
+
 class RenderersRenderer:
     """A pool of ``renderers`` renderers, one tokenizer each, used from threads.
 
     ``thinking_retention="all"`` keeps a reasoning model's earlier thinking in
     the history. Dropping it would re-render the previous turn differently from
-    what was sampled, and every turn would fork instead of extending.
+    what was sampled, and every turn would fork instead of extending. None
+    follows the chat template's own knobs (e.g. Qwen3.6's ``preserve_thinking``).
+
+    ``renderer`` names the ``renderers`` renderer (``"qwen3.6"``, ...). By default
+    it is picked from the tokenizer's Hub name, which a local checkout's path
+    doesn't match. ``chat_template_kwargs`` are the chat template's own options,
+    e.g. ``{"enable_thinking": True, "preserve_thinking": True}``.
     """
 
     def __init__(
@@ -93,22 +115,20 @@ class RenderersRenderer:
         tokenizer: str,
         *,
         size: int = 8,
-        thinking_retention: str = "all",
+        thinking_retention: str | None = "all",
         chat_template_kwargs: Mapping[str, Any] | None = None,
+        renderer: str | None = None,
     ) -> None:
-        from renderers import AutoRendererConfig, create_renderer
+        from renderers import create_renderer
         from renderers.base import load_tokenizer
 
         self.name = tokenizer
+        config = renderer_config(renderer, thinking_retention)
 
         def build() -> tuple[Any, Any]:
             loaded = load_tokenizer(tokenizer)
-            renderer = create_renderer(
-                loaded,
-                AutoRendererConfig(thinking_retention=thinking_retention),
-                chat_template_kwargs=chat_template_kwargs,
-            )
-            return renderer, loaded
+            built = create_renderer(loaded, config, chat_template_kwargs=chat_template_kwargs)
+            return built, loaded
 
         #: (renderer, its tokenizer) pairs, each used by one thread at a time.
         self._slots: queue.Queue[tuple[Any, Any]] = queue.Queue()
@@ -158,12 +178,27 @@ class RenderersRenderer:
             return None
         return Rendered(token_ids=token_ids, tail_indices=list(out.message_indices[reused:]), reused=reused)
 
-    def parse(self, completion_ids: Sequence[int], tools: Sequence[Mapping[str, Any]] | None) -> dict[str, Any]:
-        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text."""
+    def parse(
+        self,
+        completion_ids: Sequence[int],
+        tools: Sequence[Mapping[str, Any]] | None,
+        prompt_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Only cleanly parsed tool calls become ``tool_calls``; a malformed one stays in the text.
+
+        ``prompt_ids`` is the prompt the completion was sampled after. A template whose generation prompt
+        opens the thinking block (Qwen3.5 and 3.6 with ``enable_thinking``: ``<|im_start|>assistant\n<think>\n``)
+        leaves the completion without its ``<think>``; the renderer needs the prompt to tell that the
+        completion starts in reasoning, or the reasoning stays in ``content``.
+        """
         from renderers import ToolCallParseStatus
 
         with self._checkout() as (renderer, _):
-            parsed = renderer.parse_response(list(completion_ids), tools=normalize_tools(tools))
+            parsed = renderer.parse_response(
+                list(completion_ids),
+                tools=normalize_tools(tools),
+                prompt_ids=list(prompt_ids) if prompt_ids is not None else None,
+            )
         message: dict[str, Any] = {"role": "assistant", "content": parsed.content}
         if getattr(parsed, "reasoning_content", None) is not None:
             message["reasoning_content"] = parsed.reasoning_content

@@ -613,7 +613,31 @@ async def test_a_prompt_that_leaves_no_room_is_refused() -> None:
         with pytest.raises(openai.BadRequestError) as raised:
             await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")])
         assert "context_length_exceeded" in str(raised.value)
+        # OpenAI's wording, which LiteLLM maps to ContextWindowExceededError.
+        assert "maximum context length is 5 tokens" in str(raised.value)
         assert stack.engine.requests == []
+        # Recorded, and reported by `finish`, so a harness that only exits on it can be told apart.
+        failure = stack.server.trajectories[created["id"]].failures[-1]
+        assert (failure.status, failure.code) == (400, "context_length_exceeded")
+        assert (await stack.finish(created["id"]))["context_length_exceeded"] is True
+
+
+async def test_finish_reports_no_context_overflow_for_a_normal_rollout() -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        await converse(client(created["base_url"]), "a")
+        assert (await stack.finish(created["id"]))["context_length_exceeded"] is False
+
+
+async def test_the_completion_is_parsed_knowing_its_prompt() -> None:
+    # A template whose generation prompt opens the thinking block leaves `<think>` out of the completion.
+    async with token_stack() as stack:
+        seen = []
+        parse = stack.renderer.parse
+        stack.renderer.parse = lambda ids, tools, prompt_ids=None: seen.append(prompt_ids) or parse(ids, tools)
+        created = await stack.create()
+        await converse(client(created["base_url"]), "a")
+        assert seen == [stack.engine.requests[0]["token_ids"]]
 
 
 # -- failures ---------------------------------------------------------------------------

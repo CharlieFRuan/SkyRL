@@ -98,7 +98,8 @@ def start_servers(
 
     ``settings`` are ``skycap.CaptureService``'s options (``upstream_url``, ``tokenizer``, sampling, ...).
     ``exposure`` names a ``skycap.exposure`` way in for agents in remote sandboxes, built in each actor
-    with ``exposure_kwargs``; for ``external_host``, server ``i`` gets ``port + i``.
+    with ``exposure_kwargs``; server ``i`` gets ``port + i`` when they have a ``port`` (``external_host``, or
+    a custom class such as ``relay_exposure.RelayPathExposure``).
     """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
@@ -127,12 +128,18 @@ def start_servers(
 def exposure_for(
     exposure: Optional[str], kwargs: Optional[Dict[str, Any]], index: int
 ) -> Optional[Tuple[str, Dict[str, Any]]]:
-    """Server ``index``'s exposure, as the name and kwargs its actor builds it from."""
+    """Server ``index``'s exposure, as the name and kwargs its actor builds it from.
+
+    An exposure with a ``port`` binds one per server: server ``index`` gets ``port + index``. That is
+    ``external_host``'s (from ``EXTERNAL_HOST_PORT`` unless given), and any custom class's given one.
+    """
     if exposure is None:
         return None
     kwargs = dict(kwargs or {})
     if exposure == "external_host":
-        kwargs["port"] = kwargs.get("port", EXTERNAL_HOST_PORT) + index
+        kwargs.setdefault("port", EXTERNAL_HOST_PORT)
+    if kwargs.get("port") is not None:
+        kwargs["port"] = int(kwargs["port"]) + index
     return exposure, kwargs
 
 

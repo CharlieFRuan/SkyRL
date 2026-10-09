@@ -96,6 +96,9 @@ class FinishResult:
     unbridged_calls: int = 0
     #: Where the record is, or None when the server has no ``record_dir`` (or couldn't write it).
     record: RecordLocation | None = None
+    #: Whether skycap refused one of the trajectory's prompts as too long for the model's context. An agent
+    #: that calls the model itself (an installed one) reports that only as its own failure.
+    context_length_exceeded: bool = False
 
 
 class Trajectory:
@@ -143,6 +146,7 @@ class Trajectory:
             samples=[Sample.from_json(s) for s in body["samples"]],
             unbridged_calls=body.get("unbridged_calls", 0),
             record=RecordLocation.from_json(body.get("record")),
+            context_length_exceeded=body.get("context_length_exceeded", False),
         )
         return self.result
 

@@ -61,6 +61,13 @@ class TrialOutcome:
     unbridged_calls: int = 0
     # R3: the trial finished, but a trained path lacked routed experts.
     missing_routes: bool = False
+    # The trial as stock Harbor scores it, whatever it trains as: the verifier's reward, or None when the
+    # verifier didn't run; the exception Harbor recorded; and its trial directory's name. For evaluation.
+    verifier_reward: Optional[float] = None
+    exception: Optional[str] = None
+    trial_name: Optional[str] = None
+    # The skycap trajectory the trial's model calls went to.
+    skycap_id: Optional[str] = None
 
 
 @dataclass

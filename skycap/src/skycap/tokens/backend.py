@@ -28,7 +28,7 @@ from skycap.openai_chat import ChatRequest, error_body
 from skycap.tokens import response, turn
 from skycap.tokens.engine import EngineError, VLLMEngine
 from skycap.tokens.renderer import TokenRenderer
-from skycap.trajectory import Failure, Trajectory
+from skycap.trajectory import CONTEXT_LENGTH_EXCEEDED, Failure, Trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -181,12 +181,17 @@ class TokensBackend:
         if self.max_model_len is not None:
             room = self.max_model_len - len(planned.prompt_ids)
             if room <= 0:
-                return _error(
-                    f"prompt of {len(planned.prompt_ids)} tokens leaves no room within max_model_len="
-                    f"{self.max_model_len}",
-                    400,
-                    code="context_length_exceeded",
+                # OpenAI's wording, which clients recognize (LiteLLM raises ContextWindowExceededError), so an
+                # agent gives up instead of retrying a request that can't succeed.
+                message = (
+                    f"This model's maximum context length is {self.max_model_len} tokens. However, your messages "
+                    f"resulted in {len(planned.prompt_ids)} tokens, which leaves no room for a completion. "
+                    "Please reduce the length of the messages."
                 )
+                # Recorded, so `finish` can say the rollout ran into the context limit: an agent that calls the
+                # model itself reports it only as its own failure.
+                self._fail(trajectory, 400, message, code=CONTEXT_LENGTH_EXCEEDED)
+                return _error(message, 400, code=CONTEXT_LENGTH_EXCEEDED)
             max_tokens = min(max_tokens, room) if max_tokens else room
         if max_tokens:
             sampling["max_tokens"] = max_tokens
@@ -227,7 +232,7 @@ class TokensBackend:
         if self.use_raw_content:
             reply = await asyncio.to_thread(self._raw_reply, output.completion_ids, planned.prompt_ids)
         else:
-            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools)
+            reply = await asyncio.to_thread(self.renderer.parse, output.completion_ids, chat.tools, planned.prompt_ids)
         reason = response.finish_reason(output.finish_reason, reply)
         call = CallInfo(
             t_start=started,
@@ -307,9 +312,9 @@ class TokensBackend:
         return {"role": "assistant", "content": text}
 
     @staticmethod
-    def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:
+    def _fail(trajectory: Trajectory, status: int | None, error: str, code: str | None = None) -> None:
         if trajectory.is_open:
-            trajectory.failures.append(Failure(t=time.time(), status=status, error=error))
+            trajectory.failures.append(Failure(t=time.time(), status=status, error=error, code=code))
 
 
 def _resolve_max_tokens(sampling: Mapping[str, Any]) -> dict[str, Any]:

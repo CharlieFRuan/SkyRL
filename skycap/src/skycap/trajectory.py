@@ -14,6 +14,9 @@ from skycap.retry import RetryCache
 
 Status = Literal["open", "finished", "failed", "abandoned"]
 
+#: ``Failure.code`` of a prompt refused because it leaves no room within the model's context.
+CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+
 
 def new_trajectory_id() -> str:
     return f"tr_{secrets.token_hex(8)}"
@@ -31,6 +34,8 @@ class Failure:
     status: int | None
     error: str
     input_leaf: int | None = None
+    #: The error's machine-readable code when skycap refused the call itself, e.g. ``context_length_exceeded``.
+    code: str | None = None
 
 
 @dataclass(eq=False)
@@ -63,6 +68,11 @@ class Trajectory:
     @property
     def is_open(self) -> bool:
         return self.status == "open"
+
+    @property
+    def context_length_exceeded(self) -> bool:
+        """Whether skycap refused one of its prompts as too long for the model's context."""
+        return any(failure.code == CONTEXT_LENGTH_EXCEEDED for failure in self.failures)
 
     def touch(self) -> None:
         self.last_active = time.monotonic()
