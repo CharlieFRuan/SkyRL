@@ -23,6 +23,8 @@ set -a
 # shellcheck disable=SC1090
 source "$KEYS_FILE"
 set +a
+# Harbor checks for the provider key in its own environment before starting mini-swe-agent, not just in --ae.
+export OPENAI_API_KEY="$KEY" MSWEA_API_KEY="$KEY"
 export PYTHONPATH="$LABELED_DAYTONA_DIR${PYTHONPATH:+:$PYTHONPATH}" MIMO_RUN_ID="${MIMO_RUN_ID:-$JOB_NAME}" MIMO_TTL_MINUTES=180
 # Agent 1800 s and verifier 300 s out of the tasks' 3000 s budgets (Marin's limits; the skycap eval sets them directly).
 exec harbor run -y -p "$TASKS_DIR" -o "$JOBS_DIR" --job-name "$JOB_NAME" -e daytona -n "$N_CONCURRENT" \
