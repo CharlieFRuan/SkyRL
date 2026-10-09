@@ -60,3 +60,29 @@ also match (p50/p90 peak prompt 39.2k/64.9k vs 40.5k/65.0k).
   Harbor timeout.
 - **Engine env:** the baseline vLLM must come from SkyRL's locked env, with the flashinfer jit-cache/cubin wheels. A plain
   `pip install vllm==0.30.0` JIT-compiles the trtllm MoE kernels for tens of minutes.
+
+## Terminal-Bench (TB-Lite and TB 2.1), 2026-10-09
+
+**Same check, same agent** (mini-swe-agent 2.4.6), with `mini_swe_agent_qwen36_tb.yaml`:
+- 131,072-token context and 16,384 output tokens per turn (the training settings).
+- Each task's own agent and verifier timeouts and sandbox sizes.
+- 3 runs per arm.
+
+**Tasks:**
+- **TB-Lite:** Harbor registry `openthoughts-tblite` 2.0 (OpenThoughts-TBLite @ `f075e463`), 100 tasks.
+  - `sympy-bug-fix` dropped: its verifier passes with a nop agent.
+  - 98 tasks are scored in both arms.
+- **TB 2.1:** `harborframework/terminal-bench-2.1` @ `3e235dff` on Hugging Face, 89 tasks.
+
+| Dataset | Baseline (stock Harbor + vLLM) | SkyCap | SkyCap − baseline, paired (95% CI) |
+|---|---|---|---|
+| TB-Lite | 0.502 (sd 0.039) | 0.498 (sd 0.016) | −0.004 (−0.066 to +0.060) |
+| TB 2.1 | 0.395 (sd 0.020) | 0.375 (sd 0.017) | −0.021 (−0.079 to +0.036) |
+
+**Behaviour matches too:**
+- Turns: p50 22 vs 25 (TB-Lite), 31 vs 31 (TB 2.1).
+- Peak prompt p90: 85k vs 81k, and 113k vs 112k.
+- Both arms hit the same 114.7k ceiling (131,072 − 16,384), so `max_tokens_policy=reject` matches vLLM.
+
+**Not comparable to published numbers:** the TB 2.0 model-card score (51.5) used Terminus-2 with 256k context, 80k output
+tokens and 32 CPU / 48 GB sandboxes.
