@@ -1,9 +1,10 @@
 """Compare stock-Harbor runs with skycap runs of the same agent on the same tasks (parity check).
 
-usage: python compare_parity.py --arm baseline <trials_dir> [<trials_dir> ...] --arm skycap <trials_dir> [...]
+usage: python compare_parity.py [--split K] --arm baseline <trials_dir> [...] --arm skycap <trials_dir> [...]
 
 Each argument after an --arm name is one run: a directory of Harbor trial dirs (each with result.json and
-agent/mini-swe-agent.trajectory.json). Prints, per arm: per-run mean reward, the mean and spread over runs, a
+agent/mini-swe-agent.trajectory.json). With --split K, a single directory holding K attempts per task (harbor -k K,
+or eval_n_samples_per_prompt=K) is split into K runs by each task's attempt order. Prints, per arm: per-run mean reward, the mean and spread over runs, a
 95% CI over task-level means (tasks resampled), exit statuses, exceptions, turn counts and per-call token sizes;
 then the difference between the arms with a paired (per-task) bootstrap CI.
 """
@@ -39,6 +40,7 @@ def load_run(trials_dir: Path) -> dict:
         task = result.parent.name.rsplit("__", 1)[0]
         out[task].append(
             dict(
+                started=r.get("started_at") or "",
                 reward=None if reward is None else float(reward),
                 exception=exc,
                 exit_status=exit_status,
@@ -48,6 +50,15 @@ def load_run(trials_dir: Path) -> dict:
             )
         )
     return out
+
+
+def split_run(run: dict, k: int) -> list:
+    """K runs out of one directory with K attempts per task: the i-th attempt (by start time) of each task."""
+    runs = [collections.defaultdict(list) for _ in range(k)]
+    for task, xs in run.items():
+        for i, x in enumerate(sorted(xs, key=lambda x: x["started"])[:k]):
+            runs[i][task].append(x)
+    return runs
 
 
 def run_mean(run: dict) -> float:
@@ -94,8 +105,12 @@ def describe(name: str, runs: list) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", nargs="+", action="append", required=True, metavar=("NAME", "TRIALS_DIR"))
+    ap.add_argument("--split", type=int, default=0, help="split each directory into this many runs (K attempts per task)")
     args = ap.parse_args()
-    arms = {a[0]: [load_run(Path(p)) for p in a[1:]] for a in args.arm}
+    arms = {}
+    for a in args.arm:
+        runs = [load_run(Path(p)) for p in a[1:]]
+        arms[a[0]] = [r for run in runs for r in split_run(run, args.split)] if args.split else runs
     tms = {name: describe(name, runs) for name, runs in arms.items()}
     if len(tms) == 2:
         (a, ta), (b, tb) = tms.items()
