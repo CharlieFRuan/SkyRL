@@ -78,6 +78,11 @@ export SKYCAP_TRIAL_TIMEOUT_SEC="${SKYCAP_TRIAL_TIMEOUT_SEC:-3600}"
 # LabeledDaytonaEnv's sandbox label.
 export MIMO_RUN_ID="${MIMO_RUN_ID:-$EXPERIMENT}"
 
+# AGENT_TIMEOUT=task (and VERIFIER_TIMEOUT=task) keep each task's own timeouts from its task.toml.
+TIMEOUT_ARGS=()
+[[ "$AGENT_TIMEOUT" != task ]] && TIMEOUT_ARGS+=(harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT")
+[[ "$VERIFIER_TIMEOUT" != task ]] && TIMEOUT_ARGS+=(harbor_trial_config.verifier.override_timeout_sec="$VERIFIER_TIMEOUT")
+
 EXPOSURE_ARGS=(
   skycap.exposure.type=examples.train_integrations.harbor_skycap.relay_exposure:RelayPathExposure
   skycap.exposure.kwargs.relay_host="$RELAY_HOST"
@@ -146,8 +151,7 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   harbor_trial_config.agent.name=mini-swe-agent \
   harbor_trial_config.agent.kwargs.version="$MINI_SWE_AGENT_VERSION" \
   harbor_trial_config.agent.kwargs.config_file="$MSWEA_CONFIG" \
-  harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT" \
-  harbor_trial_config.verifier.override_timeout_sec="$VERIFIER_TIMEOUT" \
+  "${TIMEOUT_ARGS[@]}" \
   harbor_trial_config.environment.type=daytona \
   harbor_trial_config.environment.import_path=labeled_daytona:LabeledDaytonaEnv \
   harbor_trial_config.environment.override_cpus=null \

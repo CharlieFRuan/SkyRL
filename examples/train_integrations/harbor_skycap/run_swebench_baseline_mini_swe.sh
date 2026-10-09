@@ -27,10 +27,12 @@ set +a
 export OPENAI_API_KEY="$KEY" MSWEA_API_KEY="$KEY"
 export PYTHONPATH="$LABELED_DAYTONA_DIR${PYTHONPATH:+:$PYTHONPATH}" MIMO_RUN_ID="${MIMO_RUN_ID:-$JOB_NAME}" MIMO_TTL_MINUTES=180
 # Agent 1800 s and verifier 300 s out of the tasks' 3000 s budgets (Marin's limits; the skycap eval sets them directly).
+# TIMEOUT_FLAGS="" keeps each task's own timeouts (as AGENT_TIMEOUT=task VERIFIER_TIMEOUT=task in the skycap eval).
+# MSWEA_CONFIG picks the mini-swe-agent config (default: the SWE-bench one).
 exec harbor run -y -p "$TASKS_DIR" -o "$JOBS_DIR" --job-name "$JOB_NAME" -e daytona -n "$N_CONCURRENT" \
   --environment-import-path labeled_daytona:LabeledDaytonaEnv \
   -a mini-swe-agent -m "openai/$SERVED_MODEL_NAME" \
-  --ak version=2.4.6 --ak config_file="$HERE/mini_swe_agent_qwen36.yaml" \
+  --ak version=2.4.6 --ak config_file="${MSWEA_CONFIG:-$HERE/mini_swe_agent_qwen36.yaml}" \
   --ae OPENAI_API_KEY="$KEY" --ae OPENAI_API_BASE="$BASE_URL" --ae OPENAI_BASE_URL="$BASE_URL" \
   --ae MSWEA_API_KEY="$KEY" --ae MSWEA_COST_TRACKING=ignore_errors --ae LITELLM_LOCAL_MODEL_COST_MAP=True \
-  --agent-timeout-multiplier 0.6 --verifier-timeout-multiplier 0.1 "$@"
+  ${TIMEOUT_FLAGS-"--agent-timeout-multiplier 0.6 --verifier-timeout-multiplier 0.1"} "$@"
