@@ -77,7 +77,7 @@ also match (p50/p90 peak prompt 39.2k/64.9k vs 40.5k/65.0k).
 | Dataset | Baseline (stock Harbor + vLLM) | SkyCap | SkyCap − baseline, paired (95% CI) |
 |---|---|---|---|
 | TB-Lite | 0.502 (sd 0.039) | 0.498 (sd 0.016) | −0.004 (−0.066 to +0.060) |
-| TB 2.1 | 0.395 (sd 0.020) | 0.375 (sd 0.017) | −0.021 (−0.079 to +0.036) |
+| TB 2.1 | 0.393 (sd 0.022) | 0.375 (sd 0.017) | −0.019 (−0.075 to +0.037) |
 
 **Behaviour matches too:**
 - Turns: p50 22 vs 25 (TB-Lite), 31 vs 31 (TB 2.1).
