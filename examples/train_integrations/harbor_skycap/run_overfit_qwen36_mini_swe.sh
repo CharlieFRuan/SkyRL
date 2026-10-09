@@ -56,6 +56,8 @@ LOGGER="${LOGGER:-$([[ -n "${WANDB_API_KEY:-}" ]] && echo wandb || echo console)
 
 export PYTHONPATH="$LABELED_DAYTONA_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export SKYRL_PYTHONPATH_EXPORT=1
+# Backstop for a wedged sandbox (agent + verifier + build timeouts fit well inside it).
+export SKYCAP_TRIAL_TIMEOUT_SEC="${SKYCAP_TRIAL_TIMEOUT_SEC:-7200}"
 export MIMO_RUN_ID="${MIMO_RUN_ID:-$RUN_NAME}"
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
 

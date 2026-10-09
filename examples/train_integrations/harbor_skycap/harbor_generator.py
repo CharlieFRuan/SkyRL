@@ -60,6 +60,8 @@ litellm.suppress_debug_info = True
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 # Attempts per trial. An eval that must score like a single `harbor run` sets SKYCAP_TRIAL_ATTEMPTS=1.
 MAX_NUM_RETRIES_PER_TRIAL = int(os.environ.get("SKYCAP_TRIAL_ATTEMPTS", "2"))
+# Hard wall-clock limit per trial attempt in seconds (0: none), above the agent, verifier and build timeouts.
+TRIAL_TIMEOUT_SEC = float(os.environ.get("SKYCAP_TRIAL_TIMEOUT_SEC", "0"))
 
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"
@@ -258,7 +260,10 @@ class HarborSkycapGenerator(GeneratorInterface):
             async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
                 config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
                 async with self._rate_limiter:
-                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+                    run = (await Trial.create(TrialConfig.model_validate(config))).run()
+                    # A wedged sandbox can hang a Daytona call past every Harbor timeout; one such trial would stall
+                    # a synchronous step forever. Past the hard limit it is cancelled, then retried or masked.
+                    results = await (asyncio.wait_for(run, TRIAL_TIMEOUT_SEC) if TRIAL_TIMEOUT_SEC > 0 else run)
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None

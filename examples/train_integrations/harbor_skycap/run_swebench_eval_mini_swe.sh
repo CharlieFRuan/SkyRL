@@ -73,6 +73,8 @@ export PYTHONPATH="$LABELED_DAYTONA_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export SKYRL_PYTHONPATH_EXPORT=1
 # One attempt per trial, as `harbor run` (the baseline) makes: a failed trial scores 0 instead of being rerun.
 export SKYCAP_TRIAL_ATTEMPTS="${SKYCAP_TRIAL_ATTEMPTS:-1}"
+# Backstop for a wedged sandbox (agent + verifier + build timeouts fit well inside it).
+export SKYCAP_TRIAL_TIMEOUT_SEC="${SKYCAP_TRIAL_TIMEOUT_SEC:-3600}"
 # LabeledDaytonaEnv's sandbox label.
 export MIMO_RUN_ID="${MIMO_RUN_ID:-$EXPERIMENT}"
 
