@@ -71,6 +71,18 @@ def normalize_tools(tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str,
     return flat
 
 
+def wrap_tools(tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """Tools in OpenAI's ``{"type": "function", "function": {...}}`` form, as vLLM passes them to a chat template."""
+    if not tools:
+        return None
+    return [
+        dict(tool)
+        if tool.get("type") == "function" and isinstance(tool.get("function"), Mapping)
+        else {"type": "function", "function": dict(tool)}
+        for tool in tools
+    ]
+
+
 def join_pieces(pieces: Sequence[str]) -> tuple[str, list[int]]:
     """Per-token decoded pieces as one text and each piece's UTF-8 byte offset in it."""
     offsets, cursor = [], 0
@@ -141,6 +153,14 @@ class RenderersRenderer:
                 self._slots.put(slot)
         with self._checkout() as (renderer, _):
             self._stop_ids = [int(t) for t in renderer.get_stop_token_ids()]
+            # Qwen3.5/3.6's template prints each tool object verbatim (`tool | tojson`), and vLLM hands it OpenAI's
+            # `{"type": "function", "function": {...}}` form; the renderer dumps whatever it gets, so it gets that form
+            # too, or every prompt's tool block differs from what a stock endpoint renders.
+            self._wrapped_tools = type(renderer).__module__.rsplit(".", 1)[-1] in ("qwen35", "qwen36")
+
+    def _render_tools(self, tools: Sequence[Mapping[str, Any]] | None) -> list[dict[str, Any]] | None:
+        """The tools as the renderer renders them: OpenAI's wrapped form for Qwen3.5/3.6 (see ``__init__``)."""
+        return wrap_tools(tools) if self._wrapped_tools else normalize_tools(tools)
 
     @contextmanager
     def _checkout(self) -> Iterator[tuple[Any, Any]]:
@@ -152,7 +172,7 @@ class RenderersRenderer:
 
     def render(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Mapping[str, Any]] | None) -> Rendered:
         with self._checkout() as (renderer, _):
-            out = renderer.render(list(messages), tools=normalize_tools(tools), add_generation_prompt=True)
+            out = renderer.render(list(messages), tools=self._render_tools(tools), add_generation_prompt=True)
         return Rendered(token_ids=list(out.token_ids), tail_indices=list(out.message_indices))
 
     def bridge(
@@ -167,7 +187,7 @@ class RenderersRenderer:
                 list(previous_prompt),
                 list(previous_completion),
                 list(new_messages),
-                tools=normalize_tools(tools),
+                tools=self._render_tools(tools),
             )
         if out is None:
             return None
