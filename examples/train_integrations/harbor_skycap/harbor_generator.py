@@ -58,7 +58,8 @@ from .record_index import RecordLog
 litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
-MAX_NUM_RETRIES_PER_TRIAL = 2
+# Attempts per trial. An eval that must score like a single `harbor run` sets SKYCAP_TRIAL_ATTEMPTS=1.
+MAX_NUM_RETRIES_PER_TRIAL = int(os.environ.get("SKYCAP_TRIAL_ATTEMPTS", "2"))
 
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"

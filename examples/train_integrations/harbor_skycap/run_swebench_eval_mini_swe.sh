@@ -71,6 +71,8 @@ fi
 # Harbor imports the environment class in the Ray worker that runs the trials: export PYTHONPATH to Ray's workers.
 export PYTHONPATH="$LABELED_DAYTONA_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export SKYRL_PYTHONPATH_EXPORT=1
+# One attempt per trial, as `harbor run` (the baseline) makes: a failed trial scores 0 instead of being rerun.
+export SKYCAP_TRIAL_ATTEMPTS="${SKYCAP_TRIAL_ATTEMPTS:-1}"
 # LabeledDaytonaEnv's sandbox label.
 export MIMO_RUN_ID="${MIMO_RUN_ID:-$EXPERIMENT}"
 
