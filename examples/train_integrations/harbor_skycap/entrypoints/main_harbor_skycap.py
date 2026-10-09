@@ -113,6 +113,9 @@ class SkycapConfig:
     None (default) picks per agent: on for one that calls the model from this process (Terminus-2), off for
     one installed in its sandbox (mini-swe-agent), which acts through tool calls and needs them parsed, as a
     vLLM with reasoning and tool-call parsers would; its LiteLLM (``openai/``) replays ``reasoning_content``."""
+    max_tokens_policy: str = "clamp"
+    """When a call's ``max_tokens`` doesn't fit the room the prompt leaves in ``max_model_len``: ``clamp`` samples into
+    the room left; ``reject`` refuses it as a stock vLLM endpoint does (context-length error), for a parity eval."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -160,6 +163,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         "chat_template_kwargs": dict(cfg.skycap.chat_template_kwargs) if cfg.skycap.chat_template_kwargs else None,
         "thinking_retention": cfg.skycap.thinking_retention,
         "renderer_name": cfg.skycap.renderer,
+        "max_tokens_policy": cfg.skycap.max_tokens_policy,
         "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},

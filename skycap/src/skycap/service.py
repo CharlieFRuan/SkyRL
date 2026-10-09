@@ -61,6 +61,7 @@ def build_backend(
     chat_template_kwargs: Mapping[str, Any] | None = None,
     thinking_retention: str | None = "all",
     renderer_name: str | None = None,
+    max_tokens_policy: str = "clamp",
 ) -> Backend:
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
@@ -101,6 +102,7 @@ def build_backend(
         sampling_mask=sampling_mask,
         logprobs_mode=logprobs_mode,
         use_raw_content=use_raw_content,
+        max_tokens_policy=max_tokens_policy,
     )
 
 
@@ -138,6 +140,7 @@ class CaptureService:
         chat_template_kwargs: Mapping[str, Any] | None = None,
         thinking_retention: str | None = "all",
         renderer_name: str | None = None,
+        max_tokens_policy: str = "clamp",
         record_dir: str | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
@@ -167,6 +170,7 @@ class CaptureService:
             chat_template_kwargs=chat_template_kwargs,
             thinking_retention=thinking_retention,
             renderer_name=renderer_name,
+            max_tokens_policy=max_tokens_policy,
         )
         self.server = CaptureServer(
             backend,

@@ -622,6 +622,29 @@ async def test_a_prompt_that_leaves_no_room_is_refused() -> None:
         assert (await stack.finish(created["id"]))["context_length_exceeded"] is True
 
 
+async def test_reject_policy_refuses_a_max_tokens_that_does_not_fit_as_vllm_does() -> None:
+    # The prompt fits, but prompt + max_tokens doesn't: `clamp` samples into the room left, `reject` refuses.
+    async with token_stack(max_model_len=60, max_tokens_policy="reject") as stack:
+        created = await stack.create()
+        with pytest.raises(openai.BadRequestError) as raised:
+            await client(created["base_url"]).chat.completions.create(
+                model="policy", messages=[user("q")], max_tokens=1000
+            )
+        assert "maximum context length is 60 tokens. However, you requested 1000 output tokens" in str(raised.value)
+        assert stack.engine.requests == []
+        assert (await stack.finish(created["id"]))["context_length_exceeded"] is True
+    async with token_stack(max_model_len=60, max_tokens_policy="reject") as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")], max_tokens=5)
+        assert stack.engine.requests[0]["sampling_params"]["max_tokens"] == 5
+    async with token_stack(max_model_len=60) as stack:
+        created = await stack.create()
+        await client(created["base_url"]).chat.completions.create(
+            model="policy", messages=[user("q")], max_tokens=1000
+        )
+        assert stack.engine.requests[0]["sampling_params"]["max_tokens"] == 60 - len(stack.engine.requests[0]["token_ids"])
+
+
 async def test_finish_reports_no_context_overflow_for_a_normal_rollout() -> None:
     async with token_stack() as stack:
         created = await stack.create()

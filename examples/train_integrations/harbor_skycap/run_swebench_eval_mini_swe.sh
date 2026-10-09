@@ -138,6 +138,7 @@ uv run --isolated --extra fsdp --extra harbor --extra skycap \
   skycap.chat_template_kwargs.enable_thinking=true \
   skycap.chat_template_kwargs.preserve_thinking=true \
   skycap.thinking_retention=all \
+  skycap.max_tokens_policy=reject \
   "${EXPOSURE_ARGS[@]}" \
   harbor_trial_config.trials_dir="$TRIALS_DIR" \
   harbor_trial_config.agent.name=mini-swe-agent \

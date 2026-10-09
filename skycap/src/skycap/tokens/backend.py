@@ -53,8 +53,14 @@ class TokensBackend:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        max_tokens_policy: str = "clamp",
     ) -> None:
         """
+        ``max_tokens_policy`` is what happens when a request's ``max_tokens`` doesn't fit in what ``max_model_len``
+        leaves after the prompt: ``clamp`` (default) samples into the room left; ``reject`` refuses the request as
+        vLLM's OpenAI server does (prompt + max_tokens > max_model_len), for an eval that must end trajectories
+        exactly where a stock vLLM endpoint would.
+
         ``use_raw_content`` answers with the completion's own text as ``content``, as vLLM does with no
         reasoning or tool-call parser: a thinking model's reasoning stays inline, and tool calls
         stay text. For a harness written against such a server, which replays ``content`` and
@@ -70,6 +76,9 @@ class TokensBackend:
         self.sampling_mask = sampling_mask
         self.logprobs_mode = logprobs_mode
         self.use_raw_content = use_raw_content
+        if max_tokens_policy not in ("clamp", "reject"):
+            raise ValueError(f"max_tokens_policy must be 'clamp' or 'reject', not {max_tokens_policy!r}")
+        self.max_tokens_policy = max_tokens_policy
         self._locks: dict[str, asyncio.Lock] = {}
         self._session: aiohttp.ClientSession | None = None
 
@@ -190,6 +199,16 @@ class TokensBackend:
                 )
                 # Recorded, so `finish` can say the rollout ran into the context limit: an agent that calls the
                 # model itself reports it only as its own failure.
+                self._fail(trajectory, 400, message, code=CONTEXT_LENGTH_EXCEEDED)
+                return _error(message, 400, code=CONTEXT_LENGTH_EXCEEDED)
+            if self.max_tokens_policy == "reject" and max_tokens and max_tokens > room:
+                # vLLM's wording (renderers/params.py), which LiteLLM maps to ContextWindowExceededError too.
+                message = (
+                    f"This model's maximum context length is {self.max_model_len} tokens. However, you requested "
+                    f"{max_tokens} output tokens and your prompt contains {len(planned.prompt_ids)} input tokens, "
+                    f"for a total of {len(planned.prompt_ids) + max_tokens} tokens. Please reduce the length of the "
+                    "input prompt or the number of requested output tokens."
+                )
                 self._fail(trajectory, 400, message, code=CONTEXT_LENGTH_EXCEEDED)
                 return _error(message, 400, code=CONTEXT_LENGTH_EXCEEDED)
             max_tokens = min(max_tokens, room) if max_tokens else room
