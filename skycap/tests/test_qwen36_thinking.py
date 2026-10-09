@@ -12,6 +12,7 @@ Needs the ``tokens`` extra and the Qwen3.6 tokenizer: a local checkout
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -120,3 +121,20 @@ async def test_replayed_thinking_and_tool_calls_extend_every_turn(renderer: Rend
         graph = stack.server.trajectories[created["id"]].graph
         assert len(graph.paths()) == 1 and graph.branch_points() == []
         assert (await stack.finish(created["id"]))["unbridged_calls"] == 0
+
+
+def test_a_call_without_its_tool_call_tag_is_still_parsed(renderer: RenderersRenderer, tokenizer: Any) -> None:
+    # Qwen3.6 sometimes drops the opening `<tool_call>` (seen on SWE-bench Verified: ~15% of mini-swe-agent rollouts
+    # hit it at least once). vLLM's qwen3_coder parser still extracts the call; so must skycap, or the agent gets a
+    # "no tool calls" error a stock endpoint never gives.
+    prompt = tokenizer.encode("<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n", add_special_tokens=False)
+    text = (
+        "Look first.\n</think>\n\nLet me look.\n"
+        '<function=bash>\n<parameter=command>\nfind . -name "*.py"\n</parameter>\n</function>\n</tool_call><|im_end|>'
+    )
+    message = renderer.parse(tokenizer.encode(text, add_special_tokens=False), [BASH_TOOL], prompt_ids=prompt)
+    (call,) = message["tool_calls"]
+    assert call["function"]["name"] == "bash"
+    assert json.loads(call["function"]["arguments"]) == {"command": 'find . -name "*.py"'}
+    assert message["content"] == "Let me look."
+    assert message["reasoning_content"] == "Look first."
