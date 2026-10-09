@@ -86,3 +86,9 @@ also match (p50/p90 peak prompt 39.2k/64.9k vs 40.5k/65.0k).
 
 **Not comparable to published numbers:** the TB 2.0 model-card score (51.5) used Terminus-2 with 256k context, 80k output
 tokens and 32 CPU / 48 GB sandboxes.
+
+**Unbridged calls (19 of 564 TB trials, 1–2 calls each)** follow a reply that hit the 16k per-turn cap
+(`finish_reason: length`, cut off mid-thinking).
+- The agent replays that truncated reply, which renders closed (`</think>`, `<|im_end|>`) and so can't extend the sampled
+  tokens. SkyCap falls back to a fresh render of the messages, which is exactly what vLLM does on every call.
+- No effect on the eval. In training, the trajectory's graph branches at that call (`train_paths=all` trains both paths).
