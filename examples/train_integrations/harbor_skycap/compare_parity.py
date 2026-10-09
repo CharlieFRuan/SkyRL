@@ -105,12 +105,17 @@ def describe(name: str, runs: list) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--arm", nargs="+", action="append", required=True, metavar=("NAME", "TRIALS_DIR"))
-    ap.add_argument("--split", type=int, default=0, help="split each directory into this many runs (K attempts per task)")
+    ap.add_argument("--split", type=int, default=0, help="split each directory into this many runs (K attempts per task); -1 detects K per directory")
     args = ap.parse_args()
     arms = {}
     for a in args.arm:
         runs = [load_run(Path(p)) for p in a[1:]]
-        arms[a[0]] = [r for run in runs for r in split_run(run, args.split)] if args.split else runs
+        if args.split:
+            # -1: each directory's own attempt count (the most common number of trials per task in it)
+            ks = [args.split if args.split > 0 else collections.Counter(len(v) for v in run.values()).most_common(1)[0][0] for run in runs]
+            arms[a[0]] = [r for run, k in zip(runs, ks) for r in split_run(run, k)]
+        else:
+            arms[a[0]] = runs
     tms = {name: describe(name, runs) for name, runs in arms.items()}
     if len(tms) == 2:
         (a, ta), (b, tb) = tms.items()
