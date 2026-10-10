@@ -1508,6 +1508,9 @@ class TrainerConfig(BaseConfig):
     """``-1`` to keep all checkpoints, ``N`` to keep only the last N."""
     ckpt_interval: int = 10
     """Save a full training checkpoint every N steps."""
+    ckpt_at_epoch_end: bool = True
+    """Also save a checkpoint at the end of every epoch (when ``ckpt_interval > 0``). Turn off when an epoch is only a
+    step or two, e.g. overfitting a handful of prompts."""
     hf_save_interval: int = -1
     """Save HuggingFace-format model every N steps. ``-1`` to disable."""
     export_path: str = field(default_factory=lambda: os.path.expanduser("~/exports/"))
