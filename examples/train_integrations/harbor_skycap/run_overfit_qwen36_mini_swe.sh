@@ -10,7 +10,12 @@
 # triton). Each task's sandbox size comes from its own task.toml (sandbox_provision_pass.md).
 #
 # Knobs (environment): RELAY_HOST, SKYCAP_PORT, NODE_IP, TASKS_DIR, RUN_DIR, EPOCHS (= steps: 16 tasks, batch 16),
-# MAX_MODEL_LEN, LABELED_DAYTONA_DIR, KEYS_FILE (DAYTONA_API_KEY, WANDB_API_KEY), LOGGER, RUN_NAME.
+# MAX_MODEL_LEN, LABELED_DAYTONA_DIR, KEYS_FILE (DAYTONA_API_KEY, WANDB_API_KEY), LOGGER, RUN_NAME, GROUP_SIZE,
+# TRAIN_PATHS (skycap path rule: all or final), CKPT_INTERVAL.
+#
+# Multi-node: start a Ray cluster from the repo's .venv on every node first (same repo path everywhere), then run this on
+# the head with NUM_NODES=<n>, RAY_ADDRESS=<head>:<port> and USE_VENV=1 (the driver runs .venv/bin/python, so Ray
+# workers on every node use that same interpreter instead of uv's per-job env).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -27,10 +32,13 @@ SKYCAP_PORT="${SKYCAP_PORT:-11500}"
 NODE_IP="${NODE_IP:-}"
 SKYCAP_SERVERS="${SKYCAP_SERVERS:-4}"
 GROUP_SIZE="${GROUP_SIZE:-8}"
+TRAIN_PATHS="${TRAIN_PATHS:-all}"
+CKPT_INTERVAL="${CKPT_INTERVAL:-10}"
+NUM_NODES="${NUM_NODES:-1}"
 EPOCHS="${EPOCHS:-50}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-128000}"
 NUM_GPUS="${NUM_GPUS:-8}"
-NUM_ENGINES="${NUM_ENGINES:-4}"
+NUM_ENGINES="${NUM_ENGINES:-$((4 * NUM_NODES))}"
 TP_SIZE="${TP_SIZE:-2}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
 MEGATRON_TP="${MEGATRON_TP:-4}"
@@ -70,7 +78,7 @@ if [[ -n "$NODE_IP" ]]; then
   EXPOSURE_ARGS+=(skycap.exposure.kwargs.node_ip="$NODE_IP")
 fi
 
-export RAY_ADDRESS=local
+export RAY_ADDRESS="${RAY_ADDRESS:-local}"
 export RAY_DEFAULT_OBJECT_STORE_MAX_MEMORY_BYTES=$((32 * 1024 * 1024 * 1024))
 export RAY_enable_ray_event=0
 export RAY_task_events_report_interval_ms=0
@@ -78,8 +86,12 @@ unset RAY_enable_core_worker_ray_event_to_aggregator RAY_enable_export_api_write
 unset RAY_DASHBOARD_AGGREGATOR_AGENT_EVENTS_EXPORT_ADDR RAY_DASHBOARD_AGGREGATOR_AGENT_PUBLISHER_MAX_RETRIES
 
 echo "==> $RUN_NAME: $NUM_PROMPTS tasks x $GROUP_SIZE samples, $EPOCHS steps, run dir $RUN_DIR"
-uv run --isolated --extra megatron --extra harbor --extra skycap \
-  -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
+if [[ "${USE_VENV:-0}" == 1 ]]; then
+  PYTHON=("$REPO/.venv/bin/python")
+else
+  PYTHON=(uv run --isolated --extra megatron --extra harbor --extra skycap)
+fi
+"${PYTHON[@]}" -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
   data.train_data="['$TASKS_DIR']" \
   trainer.policy.model.path="$MODEL" \
   generator.inference_engine.served_model_name="$SERVED_MODEL_NAME" \
@@ -89,13 +101,14 @@ uv run --isolated --extra megatron --extra harbor --extra skycap \
   trainer.export_path="$RUN_DIR/exports" \
   trainer.ckpt_path="$RUN_DIR/ckpts" \
   trainer.log_path="$RUN_DIR/logs" \
-  trainer.ckpt_interval=10 \
+  trainer.ckpt_interval="$CKPT_INTERVAL" \
+  trainer.ckpt_at_epoch_end=false \
   trainer.max_ckpts_to_keep=2 \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode="${RESUME_MODE:-latest}" \
   trainer.strategy=megatron \
   trainer.placement.colocate_all=true \
-  trainer.placement.policy_num_nodes=1 \
+  trainer.placement.policy_num_nodes="$NUM_NODES" \
   trainer.placement.policy_num_gpus_per_node="$NUM_GPUS" \
   trainer.policy.language_model_only=true \
   trainer.ref.language_model_only=true \
@@ -157,6 +170,7 @@ uv run --isolated --extra megatron --extra harbor --extra skycap \
   generator.rate_limit.trajectories_per_second=2 \
   generator.rate_limit.max_concurrency=$((NUM_PROMPTS * GROUP_SIZE)) \
   skycap.num_servers="$SKYCAP_SERVERS" \
+  skycap.train_paths="$TRAIN_PATHS" \
   skycap.record_dir="$RUN_DIR/skycap" \
   skycap.renderer=qwen3.6 \
   skycap.chat_template_kwargs.enable_thinking=true \
