@@ -128,9 +128,9 @@ fsdp = [
     "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
     "flash-attn==2.8.3; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -168,13 +168,13 @@ megatron = [
     # into the image for a module the shim would never load).
     "nixl; sys_platform == 'linux'",
     "torch==2.13.0; sys_platform == 'linux'",
-    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
     "nvidia-resiliency-ext; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -312,9 +312,9 @@ override-dependencies = [
     # flashinfer-cubin is not published to PyPI past 0.6.13, so it (like
     # flashinfer-jit-cache) comes from flashinfer's own index -- see the
     # `flashinfer` index and [tool.uv.sources] below.
-    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "flashinfer-python==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "flashinfer-jit-cache==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
+    "flashinfer-cubin==0.6.18.post1; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.30.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
     # overridden here; these two MUST be bumped together.
