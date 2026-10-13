@@ -44,6 +44,7 @@ TP_SIZE="${TP_SIZE:-2}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.7}"
 MEGATRON_TP="${MEGATRON_TP:-4}"
 MEGATRON_EP="${MEGATRON_EP:-8}"
+MEGATRON_CP="${MEGATRON_CP:-1}"
 LR="${LR:-1.0e-6}"
 LABELED_DAYTONA_DIR="${LABELED_DAYTONA_DIR:-/home/charlieruan/mimo/rl-env-cleaner/mimo_swe}"
 KEYS_FILE="${KEYS_FILE:-$HOME/charlie_keys.env}"
@@ -129,7 +130,7 @@ fi
   generator.inference_engine.language_model_only=true \
   trainer.policy.megatron_config.tensor_model_parallel_size="$MEGATRON_TP" \
   trainer.policy.megatron_config.pipeline_model_parallel_size=1 \
-  trainer.policy.megatron_config.context_parallel_size=1 \
+  trainer.policy.megatron_config.context_parallel_size="$MEGATRON_CP" \
   trainer.policy.megatron_config.expert_model_parallel_size="$MEGATRON_EP" \
   trainer.policy.megatron_config.expert_tensor_parallel_size=1 \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity=full \
