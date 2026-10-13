@@ -296,6 +296,12 @@ override-dependencies = [
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    # Keep the pip CUDA compiler on torch's CUDA (13.0): humming-kernels pulls nvidia-cuda-nvcc unpinned (13.4),
+    # while the runtime headers are 13.0, and CCCL then rejects every JIT compile with "CUDA compiler and CUDA
+    # toolkit headers are incompatible" -- e.g. fla's TileLang GDN backward, which fla picks on Hopper (sm_90).
+    "nvidia-cuda-nvcc==13.0.88; sys_platform == 'linux'",
+    "nvidia-cuda-crt==13.0.88; sys_platform == 'linux'",
+    "nvidia-nvvm==13.0.88; sys_platform == 'linux'",
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu12 variant
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
