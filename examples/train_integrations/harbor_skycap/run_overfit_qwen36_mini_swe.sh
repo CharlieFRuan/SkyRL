@@ -11,7 +11,7 @@
 #
 # Knobs (environment): RELAY_HOST, SKYCAP_PORT, NODE_IP, TASKS_DIR, RUN_DIR, EPOCHS (= steps: 16 tasks, batch 16),
 # MAX_MODEL_LEN, LABELED_DAYTONA_DIR, KEYS_FILE (DAYTONA_API_KEY, WANDB_API_KEY), LOGGER, RUN_NAME, GROUP_SIZE,
-# TRAIN_PATHS (skycap path rule: all or final), CKPT_INTERVAL, R3=1 (rollout routing replay: vLLM returns each
+# TRAIN_PATHS (skycap path rule: all or final), CKPT_INTERVAL, RENDERER (qwen3.6 or qwen3.5), R3=1 (rollout routing replay: vLLM returns each
 # token's routed experts and Megatron replays them).
 #
 # Multi-node: start a Ray cluster from the repo's .venv on every node first (same repo path everywhere), then run this on
@@ -87,6 +87,12 @@ unset RAY_enable_core_worker_ray_event_to_aggregator RAY_enable_export_api_write
 unset RAY_DASHBOARD_AGGREGATOR_AGENT_EVENTS_EXPORT_ADDR RAY_DASHBOARD_AGGREGATOR_AGENT_PUBLISHER_MAX_RETRIES
 
 echo "==> $RUN_NAME: $NUM_PROMPTS tasks x $GROUP_SIZE samples, $EPOCHS steps, run dir $RUN_DIR"
+# Qwen3.5 checkpoints: RENDERER=qwen3.5. Its chat template has no `preserve_thinking` kwarg (Qwen3.6 added it).
+RENDERER="${RENDERER:-qwen3.6}"
+TEMPLATE_ARGS=(skycap.chat_template_kwargs.enable_thinking=true)
+if [[ "$RENDERER" == qwen3.6 ]]; then
+  TEMPLATE_ARGS+=(skycap.chat_template_kwargs.preserve_thinking=true)
+fi
 R3_ARGS=()
 if [[ "${R3:-0}" == 1 ]]; then
   R3_ARGS=(
@@ -180,9 +186,8 @@ fi
   skycap.num_servers="$SKYCAP_SERVERS" \
   skycap.train_paths="$TRAIN_PATHS" \
   skycap.record_dir="$RUN_DIR/skycap" \
-  skycap.renderer=qwen3.6 \
-  skycap.chat_template_kwargs.enable_thinking=true \
-  skycap.chat_template_kwargs.preserve_thinking=true \
+  skycap.renderer="$RENDERER" \
+  "${TEMPLATE_ARGS[@]}" \
   skycap.thinking_retention=all \
   "${EXPOSURE_ARGS[@]}" \
   "${R3_ARGS[@]}" \
