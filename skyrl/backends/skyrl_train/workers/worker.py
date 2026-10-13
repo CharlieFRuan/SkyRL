@@ -213,15 +213,18 @@ class DistributedTorchRayActor:
         LIBNUMA.numa_parse_nodestring.restype = POINTER(bitmask_t)
         LIBNUMA.numa_run_on_node_mask.argtypes = [POINTER(bitmask_t)]
         LIBNUMA.numa_run_on_node_mask.restype = c_int
-        LIBNUMA.numa_set_membind.argtypes = [POINTER(bitmask_t)]
-        LIBNUMA.numa_set_membind.restype = c_void_p
+        LIBNUMA.numa_set_preferred.argtypes = [c_int]
+        LIBNUMA.numa_set_preferred.restype = None
         LIBNUMA.numa_num_configured_nodes.argtypes = []
         LIBNUMA.numa_num_configured_nodes.restype = c_int
 
         def numa_bind(nid: int):
             bitmask = LIBNUMA.numa_parse_nodestring(bytes(str(nid), "ascii"))
             LIBNUMA.numa_run_on_node_mask(bitmask)
-            LIBNUMA.numa_set_membind(bitmask)
+            # Prefer (not require) local memory. A strict membind confines the worker's host memory to one NUMA node,
+            # which is only ~120 GB per GPU on GH200 and is shared with the colocated vLLM engine's offloaded weights;
+            # checkpoint loading then gets OOM-killed (constraint=CONSTRAINT_MEMORY_POLICY) with the rest of the node free.
+            LIBNUMA.numa_set_preferred(nid)
 
         # Only bind to NUMA nodes that actually have CPUs. On Grace-Blackwell (GB200),
         # GPU HBM is exposed as additional CPU-less NUMA nodes (e.g. 34 nodes total, only
