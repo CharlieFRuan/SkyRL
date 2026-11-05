@@ -70,14 +70,28 @@ no public port and no VM.
 
 ### What is a preview URL?
 
-Daytona can expose any port of a sandbox (3000-9999) as a public HTTPS URL served by Daytona's proxy, e.g.
-`https://9876-<sandbox id>.proxy.daytona.works`. Requests to it are proxied into the sandbox's port.
+Daytona can expose any port of a sandbox (3000-9999) as a public HTTPS URL served by Daytona's preview proxy
+(host `*.daytonaproxy01.net` for our org; the SDK returns the exact URL). Requests to it are proxied into that port.
 - `get_preview_link(port)` returns the URL plus a token you send as a header.
 - `create_signed_preview_url(port, expires_in_seconds)` returns a URL with the token embedded, valid until it expires.
 
 The relay manager long-polls the stub through the signed URL. So the **cluster** opens the connection, to Daytona's
 public proxy, and the sandbox never connects to anything. Dune does not support preview URLs (422 "Preview URLs are
 not supported for this sandbox"), hence the exec transport.
+
+Nuances:
+- **Warning page.** The proxy answers with a browser warning page instead of proxying, unless the request carries
+  `X-Daytona-Skip-Preview-Warning: true`. `manager.py` sends it on every request (`PREVIEW_HEADERS`).
+- **Expiry.** `RelayDaytonaEnvironment` signs the URL for the sandbox's `ttl_minutes` (default 360 min when none is
+  set). A sandbox that outlives its signed URL can no longer be polled. Keep the TTL above the longest trial
+  (build + agent + verifier).
+- **Public, so authenticated.** Anyone with the URL can reach the port. Hence the per-sandbox `X-Relay-Secret` on
+  every `/_relay/*` route (§ Protocol details).
+- **Scope.** A preview URL reaches one port of one sandbox, through Daytona's own proxy. Nothing on the cluster
+  becomes reachable from outside, unlike a tunnel, which opens the cluster network to whoever holds the far end.
+  Miles uses the same pattern to reach an OpenEnv server inside a Daytona sandbox (`create_signed_preview_url(8000)`).
+- **Throughput.** Bodies cross the proxy at a few hundred KB/s (~170 KB/s measured), which is why calls go as deltas
+  and polls are gzipped.
 
 ### Protocol details that matter
 
