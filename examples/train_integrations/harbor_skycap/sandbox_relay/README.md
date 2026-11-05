@@ -57,7 +57,16 @@ W&B runs are in entity `sky-posttraining-uc-berkeley` (needs access). The MiMo t
   - This was the last design that needed a tunnel binary.
 
 ### 3. Anyscale cluster, AWS ap-south-2, 4 × 8 B200 (2026-10-13 to 11-05): where this relay was born
-The notes for this period live only on that cluster (not on GitHub); the essentials:
+The notes for this period, sanitized (no IPs, instance IDs or credentials), are in rl-env-cleaner branch
+[`anyscale-b200-run`](https://github.com/CharlieFRuan/rl-env-cleaner/tree/anyscale-b200-run/anyscale_b200), with an
+index in its README:
+- `notes/RUN_NOTES.md`: run-by-run history.
+- `notes/TUNNEL_CRASH.md`: networking, chisel and the relay design.
+- `dune/DUNE_EVAL.md`: Dune Cloud.
+- `upstream_mismatch/REPORT.md`: the Nemotron mismatch.
+- `evals_1104/PLAN.md`: the November evals.
+
+The essentials:
 - **Why the relay exists.**
   - Nodes are Kubernetes pods with no ingress, and the GCP relay VM has no route to them.
   - Reverse SSH is reset by the egress filter.
