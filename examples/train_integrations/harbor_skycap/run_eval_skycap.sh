@@ -26,6 +26,8 @@
 #                          give TASKS_DIR copies of the tasks with that timeout.
 #   RUN_DIR                default /tmp/harbor/runs/<experiment>
 #   LABELS_OWNER           the sandboxes' owner label (default $USER)
+#   RELAY_TRANSPORT        preview (default; Daytona's signed preview URLs) or exec (providers without preview URLs,
+#                          e.g. Dune Cloud: the stubs are polled through the exec API)
 set -euo pipefail
 # REPO: the SkyRL checkout (default: this script's), for running a copy of this script from elsewhere.
 REPO="${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
@@ -71,6 +73,7 @@ case "$MODEL_FAMILY" in
       skycap.thinking_retention=null
       skycap.tokenizer=Qwen/Qwen3.5-9B
       trainer.policy.language_model_only=true
+      trainer.ref.language_model_only=true
       generator.inference_engine.language_model_only=true
       generator.inference_engine.engine_init_kwargs.gdn_prefill_backend=triton
     ) ;;
@@ -87,6 +90,10 @@ ENV_ARGS=(
   harbor_trial_config.environment.override_storage_mb=null
 )
 TIMEOUT_ARGS=(harbor_trial_config.agent.override_timeout_sec="${AGENT_TIMEOUT:-null}")
+EXEC_ENV_ARGS=()
+if [[ "$BENCH" == swe && "${RELAY_TRANSPORT:-preview}" == exec ]]; then
+  EXEC_ENV_ARGS=(harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.sandbox_relay.exec_environment:ExecRelayDaytonaEnvironment)
+fi
 case "$BENCH" in
   swe)
     # Harbor installs `uv tool install mini-swe-agent==<version>`, so the version also carries uv flags: resolve as of
@@ -101,6 +108,7 @@ case "$BENCH" in
       skycap.use_raw_content=false
       skycap.exposure.type=none
       skycap.sandbox_relay.enabled=true
+      skycap.sandbox_relay.transport="${RELAY_TRANSPORT:-preview}"
       harbor_trial_config.environment.override_cpus=null
       harbor_trial_config.environment.override_memory_mb=null
     ) ;;
@@ -170,5 +178,6 @@ echo "==> $EXPERIMENT: $BENCH, $MODEL_FAMILY, $(find "$TASKS_DIR" -mindepth 1 -m
   "${AGENT_ARGS[@]}" \
   "${TIMEOUT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
+  "${EXEC_ENV_ARGS[@]}" \
   "$@" 2>&1 | tee -a "$RUN_DIR/run.log"
 echo "==> done: $EXPERIMENT (trials in $RUN_DIR/trials)"

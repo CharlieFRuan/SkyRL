@@ -81,6 +81,10 @@ class SandboxRelayConfig:
     """Seconds each long-poll waits in the stub for a call."""
     give_up_after: float = 600.0
     """Seconds of failed polls after which a sandbox is dropped as gone."""
+    transport: str = "preview"
+    """How the managers reach the stubs: ``preview``, HTTP through the provider's signed preview URL (Daytona), or
+    ``exec``, through its exec API, for providers without preview URLs (Dune Cloud; pair it with
+    ``sandbox_relay.exec_environment:ExecRelayDaytonaEnvironment``). ``exec`` adds ~0.3 s per call."""
 
 
 @dataclass
@@ -195,7 +199,11 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
         sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
         relay=(
-            {"poll_timeout": cfg.skycap.sandbox_relay.poll_timeout, "give_up_after": cfg.skycap.sandbox_relay.give_up_after}
+            {
+                "poll_timeout": cfg.skycap.sandbox_relay.poll_timeout,
+                "give_up_after": cfg.skycap.sandbox_relay.give_up_after,
+                "transport": cfg.skycap.sandbox_relay.transport,
+            }
             if cfg.skycap.sandbox_relay.enabled
             else None
         ),
