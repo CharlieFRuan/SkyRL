@@ -16,7 +16,9 @@ Terminus-2 calls the model from this process and gets ``trajectory.base_url``.
 An installed agent (mini-swe-agent, Claude Code, ...) calls it from inside its
 sandbox, so it gets the trajectory's route on the server's exposed URL
 (``trajectory.exposed_base_url``, with ``skycap.exposure``), through the
-sandbox environment that LiteLLM- and OpenAI-based agents read.
+sandbox environment that LiteLLM- and OpenAI-based agents read. With
+``skycap.sandbox_relay`` it calls a stub inside its sandbox instead, which a
+relay manager next to the trajectory's server polls.
 """
 
 import asyncio
@@ -27,7 +29,7 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 from urllib.request import url2pathname
 
 import litellm
@@ -58,7 +60,10 @@ from .record_index import RecordLog
 litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
-MAX_NUM_RETRIES_PER_TRIAL = 2
+# SKYCAP_TRIAL_ATTEMPTS=1 makes one attempt per trial, as `harbor run` does: for evals scored like stock Harbor.
+MAX_NUM_RETRIES_PER_TRIAL = int(os.environ.get("SKYCAP_TRIAL_ATTEMPTS", "2"))
+#: SKYCAP_TRIAL_TIMEOUT_SEC: cancel an attempt that runs longer (a wedged sandbox), so it can't hold up a batch forever.
+TRIAL_TIMEOUT_SEC = float(os.environ["SKYCAP_TRIAL_TIMEOUT_SEC"]) if os.environ.get("SKYCAP_TRIAL_TIMEOUT_SEC") else None
 
 #: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
 #: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
@@ -105,6 +110,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
         include_images: bool = False,
+        sandbox_relay: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Args:
@@ -116,6 +122,9 @@ class HarborSkycapGenerator(GeneratorInterface):
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
+            sandbox_relay: ``{"port", "managers": {server URL: relay manager URL}}`` with ``skycap.sandbox_relay``:
+                an agent in its sandbox calls the stub on ``127.0.0.1:port``, which the trajectory's server's relay
+                manager polls, instead of an exposed URL.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -136,6 +145,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.pool = CapturePool(self.capture_urls)
         self.inference_engine_client = inference_engine_client
         self.records = records
+        self.sandbox_relay = sandbox_relay
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -183,6 +193,24 @@ class HarborSkycapGenerator(GeneratorInterface):
             raise ValueError("`trajectory_ids` is required in the input batch")
         if len(prompts) != len(trajectory_ids):
             raise ValueError(f"Prompt count ({len(prompts)}) doesn't match trajectory_ids ({len(trajectory_ids)})")
+        outcomes, attempts = await self.run_trials(input_batch, disable_tqdm)
+        output = compose(
+            outcomes,
+            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            top_k=self.generator_cfg.sampling_params.top_k,
+            sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
+            routed_experts=self._routed_experts,
+            include_images=self.include_images,
+        )
+        output["rollout_metrics"].update(trial_metrics(attempts))
+        return output
+
+    async def run_trials(
+        self, input_batch: GeneratorInput, disable_tqdm: bool = False
+    ) -> "tuple[List[Optional[TrialOutcome]], List[TrialAttempts]]":
+        """Every trial of the batch, one outcome per prompt (in order), without composing training rows."""
+        prompts = input_batch["prompts"]
+        trajectory_ids = input_batch["trajectory_ids"]
         metadata = input_batch.get("batch_metadata")
         step = getattr(metadata, "global_step", None)
         phase = getattr(metadata, "training_phase", "train")
@@ -208,17 +236,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                     group.create_task(worker(index, prompt, trajectory_id))
         finally:
             progress.close()
-
-        output = compose(
-            outcomes,
-            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
-            top_k=self.generator_cfg.sampling_params.top_k,
-            sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
-            routed_experts=self._routed_experts,
-            include_images=self.include_images,
-        )
-        output["rollout_metrics"].update(trial_metrics(attempts))
-        return output
+        return outcomes, attempts
 
     async def _trial(
         self,
@@ -284,8 +302,11 @@ class HarborSkycapGenerator(GeneratorInterface):
             # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
             # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
             async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-                config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
-                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+                config = self._trial_config(
+                    prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key, self._relay_kwargs(trajectory)
+                )
+                trial = await Trial.create(TrialConfig.model_validate(config))
+                results = await asyncio.wait_for(trial.run(), TRIAL_TIMEOUT_SEC)
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
@@ -334,8 +355,20 @@ class HarborSkycapGenerator(GeneratorInterface):
             unbridged_calls=finished.unbridged_calls,
         )
 
+    def _relay_kwargs(self, trajectory: Any) -> Optional[Dict[str, Any]]:
+        """The sandbox relay's settings for the trial's environment: which manager polls it, and where calls go."""
+        if not (self._in_sandbox and self.sandbox_relay):
+            return None
+        for server, manager in self.sandbox_relay["managers"].items():
+            if trajectory.base_url.startswith(server + "/"):
+                return {"manager": manager, "target": server, "port": self.sandbox_relay["port"]}
+        raise RuntimeError(f"no sandbox relay manager for {trajectory.base_url}")
+
     def _agent_url(self, trajectory: Any) -> str:
-        """Where the agent calls its trajectory: on the server's exposed URL when it runs in its sandbox."""
+        """Where the agent calls its trajectory: on the stub in its sandbox with the sandbox relay, else on the
+        server's exposed URL when it runs in its sandbox."""
+        if self._in_sandbox and self.sandbox_relay:
+            return f"http://127.0.0.1:{self.sandbox_relay['port']}{urlsplit(trajectory.base_url).path}"
         if self._in_sandbox and trajectory.exposed_base_url is not None:
             return trajectory.exposed_base_url
         if self._in_sandbox and not self._warned_unexposed:
@@ -353,10 +386,14 @@ class HarborSkycapGenerator(GeneratorInterface):
         base_url: str,
         cache_salt: Optional[str],
         api_key: Optional[str] = None,
+        relay: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``);
+        ``relay`` is handed to the environment class as ``skycap_relay``, which starts the sandbox's stub."""
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        if relay is not None:
+            config.setdefault("environment", {}).setdefault("kwargs", {})["skycap_relay"] = relay
         key = api_key or PLACEHOLDER_API_KEY
         if self._in_sandbox:
             # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.

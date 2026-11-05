@@ -59,12 +59,15 @@ def build_backend(
     sampling_mask: bool = False,
     logprobs_mode: str = "processed_logprobs",
     use_raw_content: bool = False,
+    thinking_retention: str | None = "all",
 ) -> Backend:
     """What ``skycap serve`` and ``CaptureService`` run, from the options they share.
 
     Token mode renders with ``tokenizer`` through ``renderers``, or with ``renderer`` when one is given
     (e.g. a test's). ``processor_kwargs`` configure a multimodal model's image processor, and must be the
     engine's ``mm_processor_kwargs`` (``RenderersRenderer``). ``engine`` is the engine's wire, vLLM's by default.
+    ``thinking_retention`` is which earlier turns' thinking the rendered history keeps (``RenderersRenderer``):
+    ``all`` (default), ``tool_cycle``, or None for what the model's chat template keeps.
     """
     if mode == "text":
         return TextBackend(upstream_url, api_key=api_key)
@@ -81,7 +84,9 @@ def build_backend(
             raise ValueError(
                 f"processor_kwargs must be a mapping (a JSON object), got {type(processor_kwargs).__name__}"
             )
-        renderer = RenderersRenderer(tokenizer, size=renderer_pool_size, processor_kwargs=processor_kwargs)
+        renderer = RenderersRenderer(
+            tokenizer, size=renderer_pool_size, thinking_retention=thinking_retention, processor_kwargs=processor_kwargs
+        )
     return TokensBackend(
         upstream_url,
         renderer,
@@ -128,6 +133,7 @@ class CaptureService:
         sampling_mask: bool = False,
         logprobs_mode: str = "processed_logprobs",
         use_raw_content: bool = False,
+        thinking_retention: str | None = "all",
         record_dir: str | None = None,
         record_mirror: str | RecordMirror | None = None,
         record_mirror_config: Mapping[str, Any] | None = None,
@@ -155,6 +161,7 @@ class CaptureService:
             sampling_mask=sampling_mask,
             logprobs_mode=logprobs_mode,
             use_raw_content=use_raw_content,
+            thinking_retention=thinking_retention,
         )
         self.server = CaptureServer(
             backend,
