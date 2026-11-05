@@ -4,7 +4,7 @@ The sibling ``main_harbor`` with two changes: a pool of skycap servers (Ray
 actors, see ``servers.py``) starts in front of the inference router, and the
 generator points each trial at its own trajectory on one of them. Agents that
 run inside their sandbox (mini-swe-agent, ...) reach it through
-``skycap.exposure``.
+``skycap.exposure``, or through ``skycap.sandbox_relay`` where sandboxes can't reach the cluster at all.
 
     uv run --isolated --extra fsdp --extra harbor --extra skycap \\
         -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \\
@@ -68,6 +68,26 @@ class SkycapWandbConfig:
 
 
 @dataclass
+class SandboxRelayConfig:
+    enabled: bool = False
+    """Reach agents in remote sandboxes without exposing skycap: each sandbox runs a small stub
+    (``sandbox_relay/stub.py``) that the agent calls on ``127.0.0.1``, and a relay manager next to each skycap
+    server long-polls the stubs through the sandbox provider's signed preview URL. Every connection starts on the
+    cluster: for clusters that sandboxes can't reach and that may not run tunnels. Needs an environment class that
+    starts the stub (``sandbox_relay.environment:RelayDaytonaEnvironment``). Replaces ``skycap.exposure``."""
+    port: int = 9876
+    """The stub's port inside each sandbox (Daytona previews ports 3000-9999)."""
+    poll_timeout: float = 20.0
+    """Seconds each long-poll waits in the stub for a call."""
+    give_up_after: float = 600.0
+    """Seconds of failed polls after which a sandbox is dropped as gone."""
+    transport: str = "preview"
+    """How the managers reach the stubs: ``preview``, HTTP through the provider's signed preview URL (Daytona), or
+    ``exec``, through its exec API, for providers without preview URLs (Dune Cloud; pair it with
+    ``sandbox_relay.exec_environment:ExecRelayDaytonaEnvironment``). ``exec`` adds ~0.3 s per call."""
+
+
+@dataclass
 class SkycapConfig:
     num_servers: int = 1
     """skycap servers, one Ray actor each. The generator spreads trajectories over them round-robin."""
@@ -98,6 +118,15 @@ class SkycapConfig:
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
     replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    tokenizer: Optional[str] = None
+    """The tokenizer skycap renders with (default ``trainer.policy.model.path``). ``renderers`` picks a model's
+    renderer by its Hugging Face id (exact match), so weights served from a local directory render with the generic
+    renderer unless this names the model's id (e.g. ``nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16``)."""
+    thinking_retention: Optional[str] = "all"
+    """Which earlier turns' thinking the rendered history keeps (``renderers``' ``thinking_retention``): ``all``
+    (default; a turn re-rendered without its thinking would differ from what was sampled and fork the graph),
+    ``tool_cycle``, or null for what the model's chat template keeps (e.g. Qwen3.5 drops the thinking before the last
+    user message), to match a stock vLLM server."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -106,6 +135,8 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
+    sandbox_relay: SandboxRelayConfig = field(default_factory=SandboxRelayConfig)
+    """Agents in remote sandboxes reach skycap through a stub in their sandbox that the cluster polls."""
     include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
     with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
@@ -133,7 +164,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
-        "tokenizer": cfg.trainer.policy.model.path,
+        "tokenizer": cfg.skycap.tokenizer or cfg.trainer.policy.model.path,
         "renderer_pool_size": cfg.skycap.renderer_pool_size,
         "model": ie.served_model_name,
         "max_model_len": engine_init.get("max_model_len") or cfg.trainer.algorithm.max_seq_len,
@@ -147,6 +178,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         },
         "sampling_mask": ie.enable_return_sample_support_set,
         "use_raw_content": cfg.skycap.use_raw_content,
+        "thinking_retention": cfg.skycap.thinking_retention,
         "require_api_key": _require_api_key(cfg),
         # A custom rule is imported by each server, under the name the generator finishes with.
         "path_rules": {} if train_paths in BUILTIN_RULES else {train_paths: train_paths},
@@ -166,6 +198,15 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
         exposure=_exposure(cfg),
         exposure_kwargs=dict(cfg.skycap.exposure.kwargs),
         sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
+        relay=(
+            {
+                "poll_timeout": cfg.skycap.sandbox_relay.poll_timeout,
+                "give_up_after": cfg.skycap.sandbox_relay.give_up_after,
+                "transport": cfg.skycap.sandbox_relay.transport,
+            }
+            if cfg.skycap.sandbox_relay.enabled
+            else None
+        ),
     )
 
 
@@ -178,6 +219,8 @@ def _require_api_key(cfg: Any) -> bool:
 def _exposure(cfg: Any) -> Optional[str]:
     """``skycap.exposure.type``, or None for ``none``. Raises ``ValueError`` on a config that can't be built."""
     kind = cfg.skycap.exposure.type
+    if cfg.skycap.sandbox_relay.enabled and kind != "none":
+        raise ValueError("skycap.sandbox_relay replaces skycap.exposure: set skycap.exposure.type=none")
     if kind == "none":
         if cfg.skycap.exposure.kwargs:
             raise ValueError("skycap.exposure.kwargs is set but skycap.exposure.type is none")
@@ -206,6 +249,11 @@ class HarborSkycapExp(HarborExp):
             train_paths=cfg.skycap.train_paths,
             records=self.records,
             include_images=cfg.skycap.include_images,
+            sandbox_relay=(
+                {"port": cfg.skycap.sandbox_relay.port, "managers": dict(zip(self.skycap.urls, self.skycap.relay_urls))}
+                if cfg.skycap.sandbox_relay.enabled
+                else None
+            ),
         )
         return self.generator
 

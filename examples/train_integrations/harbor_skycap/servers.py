@@ -9,6 +9,10 @@ trajectories over the pool's URLs round-robin.
 With an exposure (``skycap.exposure``), each server also serves its harness
 routes to agents inside remote sandboxes: the actor builds its own ``Exposure``
 from the name and kwargs, and skycap opens and closes it with the server.
+
+With a sandbox relay (``skycap.sandbox_relay``), each actor also runs a relay manager
+(``sandbox_relay/manager.py``) that long-polls the stubs in the sandboxes attached to it and
+forwards their calls to its server: every connection starts here, for clusters sandboxes can't reach.
 """
 
 from dataclasses import dataclass, field
@@ -34,6 +38,7 @@ class SkycapServerActor:
         ttl: float,
         exposure: Optional[Tuple[str, Dict[str, Any]]] = None,
         sample_support_logprobs: bool = False,
+        relay: Optional[Dict[str, Any]] = None,
     ) -> None:
         from skycap import CaptureService
         from skycap.exposure import load_exposure
@@ -52,21 +57,37 @@ class SkycapServerActor:
             exposure=load_exposure(exposure[0], **exposure[1]) if exposure is not None else None,
             **settings,
         )
+        self.relay = None
+        if relay is not None:
+            relay = dict(relay)
+            if relay.pop("transport", "preview") == "exec":
+                # Providers without preview URLs (Dune Cloud): poll the stub through the exec API.
+                from .sandbox_relay.exec_transport import ExecRelayManager as Manager
+            else:
+                from .sandbox_relay.manager import SandboxRelayManager as Manager
 
-    def start(self) -> str:
-        return self.service.start()
+            self.relay = Manager(host=default_bind_host(node_ip), advertise_host=node_ip, **relay)
+
+    def start(self) -> Tuple[str, Optional[str]]:
+        """The server's URL, and its sandbox relay manager's (None without ``skycap.sandbox_relay``)."""
+        url = self.service.start()
+        return url, (self.relay.start() if self.relay is not None else None)
 
     def stop(self, timeout: float) -> bool:
+        if self.relay is not None:
+            self.relay.stop()
         return self.service.stop(timeout)
 
 
 @dataclass
 class SkycapServers:
-    """The running pool. ``urls`` is what the generator is given."""
+    """The running pool. ``urls`` is what the generator is given; ``relay_urls[i]`` is server ``i``'s sandbox
+    relay manager (None without ``skycap.sandbox_relay``)."""
 
     actors: List[Any]
     urls: List[str]
     pg: Any
+    relay_urls: List[Optional[str]] = field(default_factory=list)
     stop_timeout: float = 600.0
     _stopped: bool = field(default=False, repr=False)
 
@@ -95,6 +116,7 @@ def start_servers(
     exposure: Optional[str] = None,
     exposure_kwargs: Optional[Dict[str, Any]] = None,
     sample_support_logprobs: bool = False,
+    relay: Optional[Dict[str, Any]] = None,
 ) -> SkycapServers:
     """``num_servers`` skycap servers in token mode, in front of SkyRL's router.
 
@@ -102,6 +124,7 @@ def start_servers(
     ``exposure`` names a ``skycap.exposure`` way in for agents in remote sandboxes, built in each actor
     with ``exposure_kwargs``; for ``external_host``, server ``i`` gets ``port + i``.
     ``sample_support_logprobs`` asks the engine for the sampler's logprob of each support member.
+    ``relay`` (``SandboxRelayManager``'s options) starts a sandbox relay manager next to each server.
     """
     if num_servers < 1:
         raise ValueError("skycap.num_servers must be at least 1")
@@ -111,11 +134,11 @@ def start_servers(
         SkycapServerActor.options(
             num_cpus=num_cpus_per_server,
             scheduling_strategy=PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=i),
-        ).remote(settings, record_dir, ttl, exposure_for(exposure, exposure_kwargs, i), sample_support_logprobs)
+        ).remote(settings, record_dir, ttl, exposure_for(exposure, exposure_kwargs, i), sample_support_logprobs, relay)
         for i in range(num_servers)
     ]
     try:
-        urls = ray.get([actor.start.remote() for actor in actors])
+        urls, relay_urls = map(list, zip(*ray.get([actor.start.remote() for actor in actors])))
     except BaseException:
         # A server or its exposure failed to start. Killing the actors takes their tunnels with them
         # (skycap ties cloudflared to its server's process); nothing was handed out yet, so nothing is lost.
@@ -123,8 +146,12 @@ def start_servers(
             ray.kill(actor)
         remove_placement_group(pg)
         raise
-    logger.info(f"skycap serving at {urls}" + (f", exposed by {exposure}" if exposure else ""))
-    return SkycapServers(actors=actors, urls=urls, pg=pg)
+    logger.info(
+        f"skycap serving at {urls}"
+        + (f", exposed by {exposure}" if exposure else "")
+        + (f", sandbox relay managers at {relay_urls}" if relay is not None else "")
+    )
+    return SkycapServers(actors=actors, urls=urls, pg=pg, relay_urls=relay_urls)
 
 
 def exposure_for(
