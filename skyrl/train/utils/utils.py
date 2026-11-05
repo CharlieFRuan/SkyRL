@@ -1202,9 +1202,10 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
     # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
     # import time in every process, so they must ride the runtime env.
-    forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
+    # SKYCAP_* too: the skycap integration's generator reads its knobs (SKYCAP_TRIAL_ATTEMPTS, ...) in the actor.
+    forwarded = {k: v for k, v in os.environ.items() if k.startswith(("SKYRL_", "SKYCAP_")) and k not in env_vars}
     if forwarded:
-        logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
+        logger.info(f"Exporting SKYRL_* / SKYCAP_* overrides to ray runtime env: {sorted(forwarded)}")
     env_vars.update(forwarded)
 
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
