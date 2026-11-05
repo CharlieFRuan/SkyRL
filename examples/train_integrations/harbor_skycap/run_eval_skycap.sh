@@ -26,6 +26,8 @@
 #                          give TASKS_DIR copies of the tasks with that timeout.
 #   RUN_DIR                default /tmp/harbor/runs/<experiment>
 #   LABELS_OWNER           the sandboxes' owner label (default $USER)
+#   SKYCAP_TTL             seconds a trajectory may sit idle (default 14400: a trial's sandbox build and agent install
+#                          can take an hour before the agent's first call, and an expired trajectory fails the agent)
 #   RELAY_TRANSPORT        preview (default; Daytona's signed preview URLs) or exec (providers without preview URLs,
 #                          e.g. Dune Cloud: the stubs are polled through the exec API)
 set -euo pipefail
@@ -172,6 +174,7 @@ echo "==> $EXPERIMENT: $BENCH, $MODEL_FAMILY, $(find "$TASKS_DIR" -mindepth 1 -m
   generator.rate_limit.max_concurrency="$N_CONCURRENT" \
   skycap.num_servers="$SKYCAP_SERVERS" \
   skycap.record_dir="$RUN_DIR/skycap" \
+  skycap.ttl="${SKYCAP_TTL:-14400}" \
   skycap.wandb.enabled=false \
   "${MODEL_ARGS[@]}" \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
