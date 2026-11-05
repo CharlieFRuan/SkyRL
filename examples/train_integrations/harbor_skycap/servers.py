@@ -59,9 +59,14 @@ class SkycapServerActor:
         )
         self.relay = None
         if relay is not None:
-            from .sandbox_relay.manager import SandboxRelayManager
+            relay = dict(relay)
+            if relay.pop("transport", "preview") == "exec":
+                # Providers without preview URLs (Dune Cloud): poll the stub through the exec API.
+                from .sandbox_relay.exec_transport import ExecRelayManager as Manager
+            else:
+                from .sandbox_relay.manager import SandboxRelayManager as Manager
 
-            self.relay = SandboxRelayManager(host=default_bind_host(node_ip), advertise_host=node_ip, **relay)
+            self.relay = Manager(host=default_bind_host(node_ip), advertise_host=node_ip, **relay)
 
     def start(self) -> Tuple[str, Optional[str]]:
         """The server's URL, and its sandbox relay manager's (None without ``skycap.sandbox_relay``)."""
