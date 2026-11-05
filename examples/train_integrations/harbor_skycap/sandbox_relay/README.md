@@ -3,6 +3,97 @@
 Status: review draft, 2026-11-05. Code on branch `skycap-evals-1104` (mainline `f854d6d9` plus this port); history and
 measurements in the cluster notes (`ops/TUNNEL_CRASH.md`, `ops/dune/`, `ops/evals_1104/PLAN.md`).
 
+## 0. Context: how we got here (for a reader without the history)
+
+This work spans four clusters and several weeks (2026-10-08 to 11-05). Everything a new reader can reach is linked below.
+W&B runs are in entity `sky-posttraining-uc-berkeley` (needs access). The MiMo task dataset is private on Hugging Face.
+
+### MiMo task data (before any RL)
+- **Repo:** [`CharlieFRuan/rl-env-cleaner`](https://github.com/CharlieFRuan/rl-env-cleaner), mostly `mimo_swe/`. It holds
+  the cleaning and provisioning of MiMo-v2.6 SWE tasks for Harbor:
+  - `HANDOFF.md`, `FINDINGS.md`;
+  - `QUALITY_PIPELINE.md` (on branch `qwen36-b200-run`);
+  - `RESIDUE_AUDIT.md`, `sandbox_provision_pass.md`;
+  - `results_qwen36/`.
+- **Data:** Hugging Face dataset `CharlieFRuan/mimo-v2.6-harbor-tasks` (private).
+- **Other branches:** `cyber-b200-run` adds an inventory of the MiMo cyber tasks (`mimo_cyber/RECONNAISSANCE.md`).
+- **Sandbox environment:** `mimo_swe/labeled_daytona.py` was the original Daytona environment class (labels, TTL,
+  agent-phase allowlist). Its relay-stub start became `environment.py` here.
+
+### 1. GCP B200 cluster (2026-10-08 to 10-11): SkyCap + mini-swe-agent RL on Qwen3.6-35B-A3B
+- **Code:** SkyRL fork branch
+  [`skycap-mini-swe`](https://github.com/CharlieFRuan/SkyRL/tree/skycap-mini-swe) (on NovaSky-AI/SkyRL main `b8963321`).
+  - Recipe: `run_overfit_qwen36_mini_swe.sh`.
+  - **Parity:** SkyCap matches stock Harbor + vLLM on SWE-bench Verified 100
+    ([`PARITY_SWEBENCH.md`](https://github.com/CharlieFRuan/SkyRL/blob/skycap-mini-swe/examples/train_integrations/harbor_skycap/PARITY_SWEBENCH.md))
+    and on Terminal-Bench (TB-Lite, TB 2.1; `[skycap] PARITY` commits on that branch).
+- **How sandboxes reached the model:**
+  - First a Cloudflare quick tunnel: 125 s response cap, ~200 calls in flight.
+  - Then a **relay VM** on GCP in the cluster's own VPC: Caddy plus an `sslip.io` hostname, since Daytona's allowlist is
+    hostname-based.
+  - Details: [`mimo_swe/model_endpoint_relay.md`](https://github.com/CharlieFRuan/rl-env-cleaner/blob/skycap-overfit/mimo_swe/model_endpoint_relay.md).
+  - This works only when the relay VM can route to the GPU nodes.
+- **Overfit runs**, W&B project `skycap-overfit`. The results table is in
+  [`skycap_overfit/cross_cluster_handoff.md` §8](https://github.com/CharlieFRuan/rl-env-cleaner/blob/skycap-overfit/skycap_overfit/cross_cluster_handoff.md):
+  - 4 tasks × 16: [8arpmq6z](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/8arpmq6z),
+    [bed481kr](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/bed481kr),
+    [e939ah4g](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/e939ah4g),
+    [evstgyyg](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/evstgyyg),
+    [flwlwm8g](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/flwlwm8g) (R3).
+  - 16 fast tasks × 8: [02dwfjb3](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/02dwfjb3),
+    [vci3ga5w](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/vci3ga5w) (peak 0.98).
+  - 1 node, lr 1e-6: [ohm8trpo](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-overfit/runs/ohm8trpo).
+- **Handoff to other clusters:**
+  [`skycap_overfit/cross_cluster_handoff.md`](https://github.com/CharlieFRuan/rl-env-cleaner/blob/skycap-overfit/skycap_overfit/cross_cluster_handoff.md).
+
+### 2. JSC JUPITER (2026-10-12 to 10-13): the same runs on aarch64 GH200, offline compute nodes
+- **Code:** SkyRL fork branches [`jupiter`](https://github.com/CharlieFRuan/SkyRL/tree/jupiter) (aarch64 deps, CP knob,
+  Qwen3.5 renderer knob) and `jupiter-aarch64-main`; rl-env-cleaner branch `jupiter`, documented in
+  [`skycap_overfit/jupiter/README.md`](https://github.com/CharlieFRuan/rl-env-cleaner/blob/jupiter/skycap_overfit/jupiter/README.md).
+- **Network:**
+  - Outbound: a CONNECT proxy on a login node.
+  - Inbound: a GCP relay VM (Caddy), reached by a chisel client on the login node through a SOCKS gate that admits only
+    the user's running Slurm nodes.
+  - This was the last design that needed a tunnel binary.
+
+### 3. Anyscale cluster, AWS ap-south-2, 4 × 8 B200 (2026-10-13 to 11-05): where this relay was born
+The notes for this period live only on that cluster (not on GitHub); the essentials:
+- **Why the relay exists.**
+  - Nodes are Kubernetes pods with no ingress, and the GCP relay VM has no route to them.
+  - Reverse SSH is reset by the egress filter.
+  - Downloading or running the **chisel** binary got a node killed within ~15 s by the platform's security scanner,
+    reproduced deliberately; on the head node it took down the whole cluster.
+  - `cloudflared` survived but needs `--protocol http2`.
+  - Hence Colby's design (§2). A survey of other RL frameworks found none that handles "remote sandbox + outbound-only
+    cluster" with an in-sandbox agent.
+- **Relay stress test** (2026-10-13): SWE-bench Verified 100 × 5 at 300 concurrent: 0.654 vs 0.663 (relay VM) and 0.673
+  (stock Harbor), 0 call errors (§4).
+- **Qwen3.6 fully async RL** on MiMo, through the relay, W&B project `skycap-mimo-fully-async`:
+  - Run 1: [08c34mur](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/08c34mur).
+  - Run 2: [14wm4ep6](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/14wm4ep6),
+    [8klyboql](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/8klyboql) and
+    [okvj1xcm](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/okvj1xcm).
+  - Run 2 relayed ~2.75M calls; SWE-bench-100 eval was flat at ~0.70 over 120 steps.
+  - The delta encoding (§2) came from this run, when long histories made calls slow.
+- **Nemotron-3.5-Lightning-30B-A3B:**
+  - **Parity.** SkyCap vs stock Harbor on SWE-bench Verified 100.
+  - **Overfits.** W&B `skycap-overfit`, runs `nem35-*`.
+  - **Logprob-mismatch investigation.** Root cause: SkyRL's weight sync rounded the fp32 router `e_score_correction_bias`
+    to bf16. Mainline later fixed it in NovaSky-AI/SkyRL #2543.
+    - W&B `nemotron_3_5_lightning_30b_grpo`: before [fc1kdvsd](https://wandb.ai/sky-posttraining-uc-berkeley/nemotron_3_5_lightning_30b_grpo/runs/fc1kdvsd),
+      after [63aqqnsp](https://wandb.ai/sky-posttraining-uc-berkeley/nemotron_3_5_lightning_30b_grpo/runs/63aqqnsp).
+    - Mainline A/B: [5xr52ubp](https://wandb.ai/sky-posttraining-uc-berkeley/nemotron_3_5_lightning_30b_grpo/runs/5xr52ubp)
+      vs [c5jy53xs](https://wandb.ai/sky-posttraining-uc-berkeley/nemotron_3_5_lightning_30b_grpo/runs/c5jy53xs).
+    - Cross-framework checks: W&B `nemotron-mismatch-xfw`.
+  - **A 3-epoch fully async run** (W&B `skycap-mimo-fully-async`,
+    [5doiopns](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/5doiopns) and
+    [uc73dejf](https://wandb.ai/sky-posttraining-uc-berkeley/skycap-mimo-fully-async/runs/uc73dejf)).
+  - **Final evals:** SWE-bench Verified 500 × 5 at base 50.3 / step 218 51.8 (card 50.7); Terminal-Bench 2.1 at base 26.3.
+- **This port** (2026-11-04 to 11-05): the fork's SkyCap and relay work moved onto current mainline (this PR).
+  - SWE-bench Verified and Terminal-Bench evals of Nemotron-3.5-Lightning and Qwen3.5-9B, with and without SkyCap.
+  - These ran on **Dune Cloud**, because the Daytona key was invalid at the time. Dune has no preview URLs, hence the
+    exec transport.
+
 ## 1. The problem
 
 With Harbor's installed agents (mini-swe-agent, Claude Code, Codex), the agent runs **inside** the task's sandbox
