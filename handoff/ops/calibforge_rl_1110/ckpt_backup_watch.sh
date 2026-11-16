@@ -23,6 +23,17 @@ while true; do
         echo "$(date '+%F %T') FAILED global_step_$step (will retry)"
       fi
     done
+    # Prune (user, 11-15: "we can delete the un-needed checkpoints that are not 25 * n steps"): of the local
+    # checkpoints keep the multiples of UPLOAD_EVERY and the latest one (the resume point after a crash). An
+    # off-grid checkpoint (an epoch end, uploaded above) goes only once its upload is marked done. PRUNE=0 disables.
+    if [[ "${PRUNE:-1}" == 1 ]]; then
+      for step in $($SSH $DRIVER "ls /mnt/local_storage/charlie/runs/$RUN/ckpts 2>/dev/null" | sed -n 's/^global_step_//p' | sort -n); do
+        [[ "$step" =~ ^[0-9]+$ && "$step" -lt "$latest" ]] || continue
+        (( step % UPLOAD_EVERY != 0 )) || continue
+        (( step % LOCAL_EVERY == 0 )) || [[ -f $MARK/$step.done ]] || continue
+        $SSH $DRIVER "rm -rf /mnt/local_storage/charlie/runs/$RUN/ckpts/global_step_$step" && echo "$(date '+%F %T') pruned local global_step_$step of $RUN"
+      done
+    fi
   fi
   sleep 300
 done

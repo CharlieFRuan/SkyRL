@@ -281,7 +281,16 @@ judgement, not a measured rule; put the choice to the user with the overfit curv
 
 The reference recipe (section 3) with the Nemotron differences of 1.2 and the layout of 1.1:
 
-- CalibForge v2 `calibforge_v2_train48` on Dune (exec relay), 2,788 tasks → 87 steps at batch 32; `EPOCHS=1`.
+- CalibForge v2 `calibforge_v2_train48` on Dune (exec relay), 2,788 tasks; `EPOCHS=1`.
+  **An epoch is shorter than tasks / batch size** (corrected 11-15 evening; an earlier version said 87 steps).
+  The trainer prints "Number of steps per epoch: 87", but with `sample_full_batch` every group dropped by the
+  zero-variance filter consumes a task too: Qwen consumed ~50 tasks per step (32 kept + ~18 dropped), so its
+  epoch of 2,598 tasks ended after ~51 steps, and the 2,788-task batch-16 run's first epoch ended after 111
+  steps instead of 174. Expect roughly 2,788 / (32 + groups dropped per step) steps, i.e. 55-65 at Qwen's keep
+  rate; Nemotron's keep rate is unknown. The epoch ends when the tasks run out: the log says
+  `sample_full_batch: epoch 0 exhausted with a partial mini-batch ...; discarding and ending the epoch`, a
+  checkpoint named `global_step_<last trained step + 1>` is saved, and with `EPOCHS=1` the run then finishes.
+  Plan evals and checkpoints around that (an "every 25 steps" eval may fire only twice).
 - Batch 32 x 16, DPPO delta 0.15, `prompt_mean`, zero-variance filter, LR from 1.4, betas [0.9, 0.98], weight
   decay 0.01, grad clip 1.0, full fine-tuning.
 - `max_staleness_steps=3`, 128 workers, 3 trial starts per second, `max_concurrency` 1,600: **the async loop
