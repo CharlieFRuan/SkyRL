@@ -153,10 +153,28 @@ Make a Nemotron variant of `run_fully_async_terminus.sh` (env-switched, as `ops/
 - `megatron_config.moe_router_score_function=sigmoid`, `moe_router_enable_expert_bias=true`,
   `trainer.mtp.enabled=false`;
 - `skycap.tokenizer=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` (**the Hugging Face id, not a local
-  path**: with a path the renderer falls back to the default one, which refuses `thinking_retention=all`),
-  `skycap.renderer=nemotron-3.5`, `skycap.chat_template_kwargs.enable_thinking=true`,
-  `skycap.chat_template_kwargs.truncate_history_thinking=false`, `skycap.thinking_retention=all`;
-- served model name, and Terminus's `model_info` for it.
+  path**: with a path the renderer falls back to the default one, which refuses `thinking_retention=all`) and
+  `skycap.thinking_retention=all`. These are the only two renderer settings this branch has, and they are what
+  the 11-04 / 11-06 Nemotron evals used.
+  **Correction (11-15 evening):** an earlier version of this brief also listed `skycap.renderer=nemotron-3.5`
+  and `skycap.chat_template_kwargs.{enable_thinking,truncate_history_thinking}`. Those exist only in the older
+  fork that ran the October mini-swe-agent runs, not here. What that means for "no thinking stripping": SkyCap
+  bridges every call that extends a stored model call (previous prompt + the sampled completion + only the new
+  messages), so earlier thinking stays, as sampled, on every bridged call; but a call rendered in full (a fork:
+  summarization, a rewritten history, a declined bridge) goes through the `renderers` library's `render()`,
+  which for Nemotron drops the thinking of assistant turns before the last user message unless
+  `truncate_history_thinking=false` reaches it. With summarization off and an append-only agent, forks should be
+  rare; check `generate/skycap/num_unbridged_calls`, `num_unbridged_trajectories` and `avg_num_paths` rather
+  than assuming. Plumbing `chat_template_kwargs` through (`RenderersRenderer` already accepts it;
+  `skycap/service.py` and `SkycapConfig` do not pass it) is a small change to propose to the user;
+- `generator.inference_engine.served_model_name=nemotron-3.5-lightning` (the generator derives the agent's model
+  name `hosted_vllm/<served name>` from it); Terminus's `model_info` needs only the two token limits `run_rl.sh`
+  already sets. The in-sandbox agent has so far only been run with Qwen3.5-9B;
+- trainer memory: the October run also set `optimizer_config_kwargs.optimizer_cpu_offload=true`,
+  `optimizer_offload_fraction=1.0`, `use_precision_aware_optimizer=true`, `overlap_cpu_optimizer_d2h_h2d=true`,
+  with full recompute, `fused_lm_head_logprob=true` and sample packing as in the Qwen launcher; it left the MoE
+  dispatcher, load balancing, grouped GEMM and `trainer.flash_attn` at their defaults (the upstream example
+  `examples/train/megatron/run_megatron_grpo_nemotron_3_5_lightning_30b.sh` sets alltoall / none / true).
 
 **R3 off** means both `trainer.policy.megatron_config.moe_enable_routing_replay=false` and
 `generator.inference_engine.enable_return_routed_experts=false` (both default false; the fully async launcher
