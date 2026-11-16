@@ -183,8 +183,16 @@ never set them).
 **Check the router-bias fix before any training.** Weight sync used to round the fp32 router bias to bf16,
 which made rollout and trainer disagree; that is what R3 was papering over. The fix is in mainline (PR #2543 and
 #2618: fp32 and integer tensors keep their dtype on the wire, `weight_sync/sources.py`). Confirm the checkout has
-it, then confirm on a few steps that the mean rollout-vs-trainer logprob gap is ~0.02 (0.017-0.030 was measured
-without R3 after the fix; 0.045-0.07 means the fix is missing). `SKYRL_DEBUG_EXPERT_BIAS=1` helps.
+it, then confirm on a few steps that the mean rollout-vs-trainer logprob gap is ~0.02. `SKYRL_DEBUG_EXPERT_BIAS=1`
+helps. Where those numbers come from (October, `ops/upstream_mismatch/REPORT.md`): GSM8K (~650 tokens) 0.045-0.053
+before the fix and 0.020 after; long agentic rollouts through SkyCap (22-40k tokens, mini-swe-agent, vLLM 0.30),
+on-policy at step 1, 0.072 before and 0.022 after; the 218-step run 0.017-0.023. So after the fix the gap did not
+grow with length. **Added 11-16:** the first CalibForge overfit step on JUPITER (35k-token responses, on-policy)
+measured 0.043 with a heavy tail (max 20), twice the October figure, while GSM8K on the same checkout gives
+0.019. Treat that as something to localise before the full run: bucket the difference by turn and position,
+re-score recorded trajectories with a fresh server's prefill (`ops/rescore_skycap.py`), and check the engine's
+Mamba state cache dtype, the trainer's `mamba_ssm` state dtype (no `state_dtype` in 2.3.2.post1) and how a
+reply cut at the 16,384-token cap lands in the training rows.
 
 Sampling: train and evaluate at temperature 1.0, top_p 1.0, top_k off, as the Qwen reference run did (the model
 card recommends top_p 0.95; the user asked for temperature 1 and the same settings as our runs).
