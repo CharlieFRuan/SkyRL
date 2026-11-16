@@ -67,6 +67,22 @@ Data (rebuilt by `ops/calibforge_rl_1110/setup_data.sh`; `$D` is the node-local 
 - `tbench21_4cpu`: Terminal-Bench 2.1 (commit `7131e43`), 89 tasks at 4 vCPU / 8 GiB / 20 GiB, plus two patches:
   `fix_qemu_apt.sh` (two Debian-bullseye tasks whose tests could not install curl) and `fix_no_ctrf.py`.
 
+### Keys the launchers expect
+
+Two files in `$D`, mode 600, sourced by `run_rl.sh` and never printed:
+
+| File | Variables | Used for |
+|---|---|---|
+| `$D/dune_keys.env` | `DAYTONA_API_KEY`, `DAYTONA_API_URL` | every sandbox (Dune speaks Daytona's API at its own URL). Required |
+| `$D/keys.env` | `WANDB_API_KEY` | logging to the W&B entity above. Required |
+| | `HF_API_KEY` (exported as `HF_TOKEN`) | the Nemotron weights and tokenizer, the CalibForge task tarball (the token's account needs access to that dataset), private uploads of traces. Required |
+| | `GH_TOKEN` | only if the agent is to push; this branch and Harbor are public |
+
+Not needed: any other Daytona key (the two Daytona orgs of the Qwen runs are not used here). Still to decide on
+the new machine: **where every 25th checkpoint is uploaded**. `ckpt_backup_watch.sh` / `upload_ckpt_s3.py` used
+the source cluster's own storage role and bucket variable, which do not exist elsewhere; give the agent a bucket
+with credentials, or a private Hugging Face repo, before the full run starts.
+
 ## 3. The reference run to replicate
 
 `qwen35-cf-v2-insb-3600-cap16k-t1-b32-lr2e-6-1113` (W&B `hwzf6cq7`), Qwen3.5-9B on Dune. Launcher:
