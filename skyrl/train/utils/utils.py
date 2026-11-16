@@ -1124,6 +1124,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     if os.environ.get("WANDB_API_KEY"):
         logger.info("Exporting wandb api key to ray runtime env")
         env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+        # The key's server and entity ride along: a raylet started with its own W&B settings (Anyscale sets
+        # WANDB_BASE_URL and WANDB_ENTITY for its hosted W&B) would otherwise pair this key with that server.
+        for var_name in ("WANDB_BASE_URL", "WANDB_ENTITY"):
+            if os.environ.get(var_name):
+                env_vars[var_name] = os.environ[var_name]
 
     if os.environ.get("MLFLOW_TRACKING_URI"):
         logger.info("Exporting mlflow tracking uri to ray runtime env")
@@ -1134,7 +1139,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
 
     # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
-    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
+    # DAYTONA_API_URL: a Daytona-API provider other than Daytona itself (e.g. Dune Cloud); without it the workers
+    # would send that provider's key to Daytona.
+    for var_name in ["DAYTONA_API_KEY", "DAYTONA_API_URL", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
         if value := os.environ.get(var_name):
             logger.info(f"Exporting {var_name} to ray runtime env")
             env_vars[var_name] = value
@@ -1369,7 +1376,14 @@ def initialize_ray(cfg: SkyRLTrainConfig):
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.
-    ray.init(runtime_env={"env_vars": env_vars}, log_to_driver=True)
+    runtime_env = {"env_vars": env_vars}
+    # SKYRL_PY_EXECUTABLE: a prebuilt interpreter at the same path on every node (e.g. a `uv sync`ed venv), used by every
+    # worker instead of the cluster's default python or a per-worker `uv run --isolated` (whose env setup, ~30-60 s
+    # each, can outlast the raylet's worker registration timeout when many workers start at once). Launch the driver
+    # with that interpreter too.
+    if os.environ.get("SKYRL_PY_EXECUTABLE"):
+        runtime_env["py_executable"] = os.environ["SKYRL_PY_EXECUTABLE"]
+    ray.init(runtime_env=runtime_env, log_to_driver=True)
 
     if not verbose_logging:
         logger.info(f"Infrastructure logs will be written to: {log_file}")

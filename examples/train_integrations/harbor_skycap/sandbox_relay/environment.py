@@ -42,10 +42,19 @@ def stub_start_command(port: int, secret: str, stub: str) -> str:
         "    { (apt-get update && apt-get install -y curl) || apk add --no-cache curl || yum install -y curl"
         " || dnf install -y curl; } >/dev/null 2>&1 || true\n"
         "  fi\n"
-        f"  export UV_INSTALL_DIR={RELAY_DIR}/bin UV_PYTHON_INSTALL_DIR={RELAY_DIR}/python\n"
+        # Images with curl but no CA bundle (curl: (77)): the installer's download needs one.
+        "  if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && command -v apt-get >/dev/null 2>&1; then\n"
+        "    (apt-get update && apt-get install -y ca-certificates) >/dev/null 2>&1 || true\n"
+        "  fi\n"
+        # UV_UNMANAGED_INSTALL: into that directory only. The installer otherwise adds a line to the task's
+        # ~/.profile and ~/.bashrc (a change to the task's sandbox that the model can see, and has deleted).
+        f"  export UV_UNMANAGED_INSTALL={RELAY_DIR}/bin UV_PYTHON_INSTALL_DIR={RELAY_DIR}/python\n"
         "  (command -v curl >/dev/null && curl -LsSf https://astral.sh/uv/0.7.13/install.sh || wget -qO- https://astral.sh/uv/0.7.13/install.sh) | sh >/dev/null 2>&1\n"
         f"  {RELAY_DIR}/bin/uv python install 3.12 >/dev/null 2>&1; PY=$({RELAY_DIR}/bin/uv python find 3.12)\n"
         "fi\n"
+        # Under a name of its own: the model's `pkill python3` / `killall python` then leaves the stub alone (in
+        # CalibForge runs that took the agent's only route to the model down in ~0.5% of trials).
+        f"ln -sf \"$PY\" {RELAY_DIR}/relay-stub 2>/dev/null && PY={RELAY_DIR}/relay-stub\n"
         f"nohup \"$PY\" {RELAY_DIR}/stub.py --port {port} --secret {shlex.quote(secret)} > {RELAY_DIR}/stub.log 2>&1 < /dev/null &\n"
         f"for i in $(seq 1 50); do \"$PY\" -c \"import urllib.request as u; r=u.Request('http://127.0.0.1:{port}/_relay/health', headers={{'X-Relay-Secret': '{secret}'}}); u.urlopen(r, timeout=2)\" 2>/dev/null && {{ echo RELAY_STUB_UP; exit 0; }}; sleep 0.2; done\n"
         f"cat {RELAY_DIR}/stub.log; exit 1"

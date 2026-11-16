@@ -130,14 +130,18 @@ def compose(
     sample_support: bool = False,
     routed_experts: bool = False,
     include_images: bool = False,
+    train_on_timeouts: bool = False,
 ) -> GeneratorOutput:
     """``top_k`` bounds sampler-support rows, as SkyRL's own capture does.
 
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
     of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
+    ``train_on_timeouts`` trains a timed-out trial with its reward (0) like a context-length one, instead of masking
+    its whole instance: with long tasks most groups have a timeout, and masking them leaves little of the batch.
     """
-    masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+    masked_reasons = MASKED_STOP_REASONS - {"agent_timeout"} if train_on_timeouts else MASKED_STOP_REASONS
+    masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in masked_reasons}
 
     groups: List[List[_Row]] = []
     trained: List[TrialOutcome] = []

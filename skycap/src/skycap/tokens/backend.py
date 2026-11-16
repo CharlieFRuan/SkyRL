@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -242,13 +243,19 @@ class TokensBackend:
     ) -> web.StreamResponse:
         dialect = chat.dialect.get_dialect()
         lock = self._locks.setdefault(trajectory.id, asyncio.Lock())
+        received = time.time()
         async with lock:
             if not trajectory.is_open:
                 return dialect.error(chat, f"trajectory is {trajectory.status}", 410, code="trajectory_closed")
-            return await self._turn(trajectory, request, chat, dialect)
+            return await self._turn(trajectory, request, chat, dialect, received=received)
 
     async def _turn(
-        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, dialect: Dialect
+        self,
+        trajectory: Trajectory,
+        request: web.Request,
+        chat: CallRequest,
+        dialect: Dialect,
+        received: float | None = None,
     ) -> web.StreamResponse:
         started = time.time()
         if self.use_raw_content and not dialect.raw_content:
@@ -274,16 +281,27 @@ class TokensBackend:
             return dialect.error(chat, str(error), 400)
 
         # `max_completion_tokens` is an alias of `max_tokens`; resolving it on each side before
-        # merging is what lets an override win over a caller's alias.
-        sampling = {**_resolve_max_tokens(chat.sampling), **_resolve_max_tokens(self.sampling_overrides)}
+        # merging is what lets an override win over a caller's alias. The trajectory's own overrides
+        # (``meta["sampling_overrides"]``, e.g. an eval's sampling) win over the server's.
+        sampling = {
+            **_resolve_max_tokens(chat.sampling),
+            **_resolve_max_tokens(self.sampling_overrides),
+            **_resolve_max_tokens(trajectory.meta.get("sampling_overrides") or {}),
+        }
         max_tokens = sampling.get("max_tokens")
-        if self.max_model_len is not None:
-            room = self.max_model_len - len(planned.prompt_ids)
+        # A trajectory may carry a context limit of its own, below the server's (``meta["max_model_len"]``): e.g.
+        # training rollouts held to what the trainer takes while evals use the engine's whole context.
+        max_model_len = self.max_model_len
+        own_limit = trajectory.meta.get("max_model_len")
+        if own_limit:
+            max_model_len = min(max_model_len, int(own_limit)) if max_model_len is not None else int(own_limit)
+        if max_model_len is not None:
+            room = max_model_len - len(planned.prompt_ids)
             if room <= 0:
                 return dialect.error(
                     chat,
                     f"prompt of {len(planned.prompt_ids)} tokens leaves no room within max_model_len="
-                    f"{self.max_model_len}",
+                    f"{max_model_len}",
                     400,
                     code="context_length_exceeded",
                 )
@@ -304,6 +322,7 @@ class TokensBackend:
             except Exception as error:  # noqa: BLE001 - the renderer's encoder, whatever it raises
                 logger.exception("trajectory %s: encoding the prompt's media failed", trajectory.id)
                 return _error(f"encoding the prompt's media: {error}", 500, kind="api_error")
+        planned_at = time.time()
         body = self.engine.request(
             prompt_ids=planned.prompt_ids,
             sampling=sampling,
@@ -324,6 +343,7 @@ class TokensBackend:
                 },
             ) as up:
                 raw = await up.read()
+                engine_done = time.time()
                 if up.status != 200:
                     self._fail(trajectory, up.status, raw.decode(errors="replace")[:2000])
                     return dialect.error(
@@ -388,6 +408,19 @@ class TokensBackend:
                 status = "failed"
         body_out = dialect.reply(chat, sampled)
         headers = {STATUS_HEADER: status}
+        if _TIMING_DIR:
+            _write_timing(
+                {
+                    "traj": trajectory.id,
+                    "t0": round(received or started, 3),
+                    "lock": round(started - (received or started), 4),
+                    "plan": round(planned_at - started, 4),
+                    "engine": round(engine_done - planned_at, 4),
+                    "post": round(time.time() - engine_done, 4),
+                    "prompt_tokens": len(planned.prompt_ids),
+                    "completion_tokens": len(output.completion_ids),
+                }
+            )
         if not chat.stream:
             out = web.Response(body=orjson.dumps(body_out), content_type="application/json", headers=headers)
         else:
@@ -430,6 +463,23 @@ class TokensBackend:
     def _fail(trajectory: Trajectory, status: int | None, error: str) -> None:
         if trajectory.is_open:
             trajectory.failures.append(Failure(t=time.time(), status=status, error=error))
+
+
+#: With ``SKYCAP_TIMING=1`` and ``SKYCAP_TIMING_DIR``: a line per call in ``<dir>/skycap-<pid>.jsonl`` with where the
+#: server spent it (waiting for the trajectory's lock, planning the prompt, the engine, the reply).
+_TIMING_DIR = os.environ.get("SKYCAP_TIMING_DIR") if os.environ.get("SKYCAP_TIMING") == "1" else None
+_timing_file = None
+
+
+def _write_timing(event: dict[str, Any]) -> None:
+    global _timing_file
+    try:
+        if _timing_file is None:
+            os.makedirs(_TIMING_DIR, exist_ok=True)
+            _timing_file = open(os.path.join(_TIMING_DIR, f"skycap-{os.getpid()}.jsonl"), "a", buffering=1)
+        _timing_file.write(orjson.dumps(event).decode() + "\n")
+    except OSError:
+        logger.exception("skycap timing: can't write")
 
 
 def finish_reason(engine_reason: str, message: dict[str, Any]) -> str:

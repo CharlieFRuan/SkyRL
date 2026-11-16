@@ -56,6 +56,14 @@ def common_prefix(a, b):
     return lo
 
 
+def _param(path, name):
+    """The value of ``name`` in a request path's query string, or None."""
+    for part in path.split("?", 1)[-1].split("&"):
+        if part.startswith(name + "="):
+            return part[len(name) + 1:]
+    return None
+
+
 class Call(object):
     def __init__(self, call_id, method, path, headers, body, base=None):
         """``base``: (id, body) of the last answered call on this path, which the cluster has."""
@@ -75,6 +83,11 @@ class Call(object):
         self.done = threading.Event()
         self.reply = None
         self.arrived = time.time()
+        # Redelivery (a poller that asks for it): when the call was last handed to a poll, how often, and whether
+        # the cluster has said it received it.
+        self.handed_at = None
+        self.deliveries = 0
+        self.acked = False
 
 
 class Relay(object):
@@ -84,6 +97,7 @@ class Relay(object):
         self.held = {}  # id -> Call, handed out and not yet answered
         self.ids = itertools.count(1)
         self.last_poll = time.time()
+        self.instance = "%x" % int(time.time() * 1e6)  # changes when the stub restarts (its call ids start over)
         # Calls answered, and their total time from the agent's request to the reply: what the agent waited.
         self.answered = 0
         self.answered_seconds = 0.0
@@ -97,16 +111,43 @@ class Relay(object):
             self.lock.notify_all()
         return call
 
-    def poll(self, timeout):
+    def poll(self, timeout, redeliver=None, ack=(), nack=()):
+        """Calls waiting for the cluster. ``redeliver`` (seconds, optional): also hand out again every held call
+        that was handed out that long ago and that the cluster has not acknowledged (``ack``: ids it received;
+        ``nack``: ids to send again at once). A poll response can be lost between the sandbox and the cluster
+        after it left here (a proxy in between): without this the agent would wait for that call until its own
+        timeout. The cluster ignores a call it already has."""
         deadline = time.time() + timeout
         with self.lock:
             self.last_poll = time.time()
-            while not self.queue:
+            for call_id in ack:
+                call = self.held.get(call_id)
+                if call is not None:
+                    call.acked = True
+            for call_id in nack:
+                call = self.held.get(call_id)
+                if call is not None:
+                    call.acked, call.handed_at = False, 0.0
+            while True:
+                if redeliver:
+                    now = time.time()
+                    again = [
+                        call for call in self.held.values()
+                        if not call.acked and call.handed_at is not None and now - call.handed_at >= redeliver and call not in self.queue
+                    ]
+                    if again:
+                        self.queue[:0] = sorted(again, key=lambda call: int(call.id))
+                if self.queue:
+                    break
                 left = deadline - time.time()
                 if left <= 0:
                     return []
-                self.lock.wait(left)
+                self.lock.wait(min(left, 5.0) if redeliver else left)
             taken, self.queue = self.queue, []
+            now = time.time()
+            for call in taken:
+                call.handed_at = now
+                call.deliveries += 1
             return taken
 
     def requeue(self, calls):
@@ -122,7 +163,7 @@ class Relay(object):
 
     def counters(self):
         with self.lock:
-            return {"answered": self.answered, "answered_seconds": self.answered_seconds}
+            return {"answered": self.answered, "answered_seconds": self.answered_seconds, "instance": self.instance}
 
     def answer(self, call_id, reply):
         with self.lock:
@@ -183,8 +224,15 @@ def make_handler(relay, secret, call_timeout):
                         timeout = min(60.0, float(self.path.split("timeout=", 1)[1].split("&", 1)[0]))
                     except ValueError:
                         pass
-                calls = relay.poll(timeout)
-                data = json.dumps(dict(relay.counters(), requests=[call.request for call in calls])).encode("utf-8")
+                redeliver = None
+                try:
+                    redeliver = float(_param(self.path, "redeliver")) if _param(self.path, "redeliver") else None
+                except ValueError:
+                    pass
+                ids = lambda name: [x for x in (_param(self.path, name) or "").split(",") if x]  # noqa: E731
+                calls = relay.poll(timeout, redeliver=redeliver, ack=ids("ack"), nack=ids("nack"))
+                requests = [dict(call.request, deliveries=call.deliveries) for call in calls]
+                data = json.dumps(dict(relay.counters(), requests=requests)).encode("utf-8")
                 try:
                     if "gzip" in (self.headers.get("Accept-Encoding") or ""):
                         return self._send(200, gzip.compress(data, 6), headers={"Content-Encoding": "gzip"})

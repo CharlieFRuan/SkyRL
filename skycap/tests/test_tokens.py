@@ -626,6 +626,21 @@ async def test_overrides_and_stop_tokens_reach_the_engine_and_the_node() -> None
         assert call.sampling == {"temperature": 0.7, "max_tokens": 50, "top_k": 20}
 
 
+async def test_the_trajectorys_sampling_overrides_win_over_the_servers() -> None:
+    async with token_stack(sampling_overrides={"temperature": 1.0, "top_p": 1.0, "top_k": -1}) as stack:
+        async with stack.http.post(
+            f"{stack.url}/trajectories", json={"meta": {"sampling_overrides": {"top_p": 0.95}}}
+        ) as response:
+            created = await response.json()
+        await client(created["base_url"]).chat.completions.create(model="policy", messages=[user("q")], top_p=0.5)
+        plain = await stack.create()
+        await client(plain["base_url"]).chat.completions.create(model="policy", messages=[user("q")], top_p=0.5)
+
+        first, second = (r["sampling_params"] for r in stack.engine.requests)
+        assert first["top_p"] == 0.95 and first["temperature"] == 1.0 and first["top_k"] == -1
+        assert second["top_p"] == 1.0
+
+
 async def test_a_prompt_that_leaves_no_room_is_refused() -> None:
     async with token_stack(max_model_len=5) as stack:
         created = await stack.create()

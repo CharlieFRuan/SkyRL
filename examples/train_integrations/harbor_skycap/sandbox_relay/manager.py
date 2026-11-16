@@ -44,6 +44,7 @@ class SandboxRelayManager:
         advertise_host: str,
         poll_timeout: float = 20.0,
         give_up_after: float = 600.0,
+        redeliver_after: float = 45.0,
     ) -> None:
         """
         Args:
@@ -55,6 +56,9 @@ class SandboxRelayManager:
         self.advertise_host = advertise_host
         self.poll_timeout = poll_timeout
         self.give_up_after = give_up_after
+        #: Preview transport: the stub hands a call out again when we have not acknowledged it for this long (a poll
+        #: response lost on the way: seen 11-14, 108 trials each waited ~48 min on one call and timed out).
+        self.redeliver_after = redeliver_after
         self.url: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -70,7 +74,13 @@ class SandboxRelayManager:
             "dropped": 0,
             "delta_calls": 0,
             "full_fetches": 0,
+            "rate_limited": 0,
+            "recovered": 0,  # calls that only arrived on a redelivery (their first poll response was lost)
+            "duplicates": 0,  # redelivered calls we already had
         }
+        # Errors by where they happened and their class ("poll:ExecError"), so that a provider rate limit shows
+        # up in /stats instead of hiding inside poll_errors.
+        self._error_types: Dict[str, int] = {}
         self._call_seconds = 0.0
         self._forward_seconds = 0.0
         # From the stubs' own counters: calls answered and the agent-side time they took.
@@ -143,6 +153,17 @@ class SandboxRelayManager:
             self._stats["detached"] += 1
         return web.json_response({"ok": task is not None})
 
+    def _note_error(self, where: str, key: str, error: BaseException) -> None:
+        """Count an error by place and class; count and log the ones that are a provider rate limit (HTTP 429)."""
+        name = f"{where}:{type(error).__name__}"
+        self._error_types[name] = self._error_types.get(name, 0) + 1
+        text = str(error)[:300].lower()
+        if "ratelimit" in type(error).__name__.lower() or "rate limit" in text or "too many requests" in text or "http 429" in text:
+            self._stats["rate_limited"] += 1
+            count = self._stats["rate_limited"]
+            if count <= 5 or count % 100 == 0:
+                logger.warning(f"sandbox relay {key}: rate limited ({where}, {count} so far): {type(error).__name__}: {str(error)[:200]}")
+
     async def _stats_route(self, request: web.Request) -> web.Response:
         calls = self._stats["calls"]
         forward = self._forward_seconds / calls if calls else None
@@ -150,6 +171,7 @@ class SandboxRelayManager:
         return web.json_response(
             {
                 **self._stats,
+                "error_types": dict(self._error_types),
                 "polling": len(self._pollers),
                 "mean_call_seconds": self._call_seconds / calls if calls else None,
                 "mean_forward_seconds": forward,
@@ -166,18 +188,44 @@ class SandboxRelayManager:
         backoff = 1.0
         seen = (0, 0.0)  # the stub's counters as of the last poll
         bodies: Dict[str, bytes] = {}  # call id -> body, the sandbox's last few, the bases of its deltas
+        # Acknowledged delivery: ``have`` = ids of calls received from this stub; ``ack`` = ids to confirm on the next
+        # poll; ``nack`` = ids whose reply could not be delivered (the stub hands them out again).
+        state: Dict[str, Any] = {"have": set(), "nack": []}
+        ack: list = []
+        instance = None
         try:
             while True:
                 try:
+                    url = f"{preview_url}/_relay/poll?timeout={self.poll_timeout}&redeliver={self.redeliver_after:.0f}"
+                    if ack:
+                        url += "&ack=" + ",".join(ack)
+                    nacked = list(state["nack"])
+                    if nacked:
+                        url += "&nack=" + ",".join(nacked)
                     async with self._session.get(
-                        f"{preview_url}/_relay/poll?timeout={self.poll_timeout}",
+                        url,
                         headers=headers,
                         timeout=aiohttp.ClientTimeout(total=self.poll_timeout + 60),
                     ) as response:
                         if response.status != 200:
                             raise RuntimeError(f"poll HTTP {response.status}: {(await response.text())[:200]}")
                         polled = await response.json()
-                    calls = polled["requests"]
+                    for call_id in nacked:
+                        if call_id in state["nack"]:
+                            state["nack"].remove(call_id)
+                    if polled.get("instance") != instance:  # first poll, or the stub restarted: its ids start over
+                        instance = polled.get("instance")
+                        state["have"].clear()
+                    ack = [str(call["id"]) for call in polled["requests"]]
+                    calls = []
+                    for call in polled["requests"]:
+                        if str(call["id"]) in state["have"]:
+                            self._stats["duplicates"] += 1
+                            continue
+                        state["have"].add(str(call["id"]))
+                        if int(call.get("deliveries") or 1) > 1:
+                            self._stats["recovered"] += 1
+                        calls.append(call)
                     failing_since, backoff = None, 1.0
                     if "answered" in polled:
                         answered, seconds = int(polled["answered"]), float(polled["answered_seconds"])
@@ -189,6 +237,7 @@ class SandboxRelayManager:
                     raise
                 except Exception as error:  # noqa: BLE001 - the sandbox may be starting, busy or gone
                     self._stats["poll_errors"] += 1
+                    self._note_error("poll", key, error)
                     now = time.monotonic()
                     failing_since = failing_since or now
                     if now - failing_since > self.give_up_after:
@@ -199,7 +248,7 @@ class SandboxRelayManager:
                     backoff = min(backoff * 2, 15.0)
                     continue
                 for call in calls:
-                    asyncio.ensure_future(self._answer(key, preview_url, headers, target, call, bodies))
+                    asyncio.ensure_future(self._answer(key, preview_url, headers, target, call, bodies, state))
         finally:
             if self._pollers.get(key) is asyncio.current_task():
                 self._pollers.pop(key, None)
@@ -235,8 +284,10 @@ class SandboxRelayManager:
         target: str,
         call: Dict[str, Any],
         bodies: Dict[str, bytes],
+        state: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """One agent call: through skycap, then the reply back to the stub."""
+        """One agent call: through skycap, then the reply back to the stub. ``state``: the poller's delivery
+        bookkeeping; a reply that cannot be delivered puts the call back so the stub hands it out again."""
         started = time.monotonic()
         try:
             data = await self._body(preview_url, headers, call, bodies)
@@ -258,6 +309,7 @@ class SandboxRelayManager:
                 }
         except Exception as error:  # noqa: BLE001 - answer the agent with an error rather than leave it hanging
             self._stats["call_errors"] += 1
+            self._note_error("forward", key, error)
             message = f"sandbox relay: skycap call failed: {type(error).__name__}: {error}"
             reply = {
                 "id": call["id"],
@@ -274,9 +326,14 @@ class SandboxRelayManager:
                         break
                     raise RuntimeError(f"reply HTTP {response.status}")
             except Exception as error:  # noqa: BLE001
+                self._note_error("reply", key, error)
                 if attempt == 4:
                     logger.warning(f"sandbox relay {key}: could not deliver reply {call['id']}: {error}")
                     self._stats["call_errors"] += 1
+                    if state is not None:
+                        # Forget the call and ask for it again: the agent is still waiting for it.
+                        state["have"].discard(str(call["id"]))
+                        state["nack"].append(str(call["id"]))
                     return
                 await asyncio.sleep(1 + attempt)
         self._stats["calls"] += 1

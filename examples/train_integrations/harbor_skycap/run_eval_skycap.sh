@@ -67,12 +67,17 @@ case "$MODEL_FAMILY" in
     SERVED="qwen3.5-9b"
     MSWEA_CONFIG="${MSWEA_CONFIG:-$HERE/mini_swe_agent_swebench_qwen35.yaml}"
     # The card's thinking-mode preset for precise coding.
-    SAMPLING=(generator.sampling_params.temperature=0.6 generator.sampling_params.top_p=0.95 generator.sampling_params.top_k=20)
+    # TEMPERATURE / TOP_P / TOP_K override it (e.g. a training run's rollout sampling).
+    SAMPLING=(
+      generator.sampling_params.temperature="${TEMPERATURE:-0.6}"
+      generator.sampling_params.top_p="${TOP_P:-0.95}"
+      generator.sampling_params.top_k="${TOP_K:-20}"
+    )
     # A vision-language checkpoint served for text; Gated DeltaNet prefill on Triton (vllm-project/vllm#36921).
     DEFAULT_TB_MAX_TURNS=250
     # The history keeps the thinking Qwen3.5's chat template keeps (what a stock vLLM server renders).
     MODEL_ARGS=(
-      skycap.thinking_retention=null
+      skycap.thinking_retention="${THINKING_RETENTION:-null}"
       skycap.tokenizer=Qwen/Qwen3.5-9B
       trainer.policy.language_model_only=true
       trainer.ref.language_model_only=true

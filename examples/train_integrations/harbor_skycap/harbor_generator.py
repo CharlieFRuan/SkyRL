@@ -23,6 +23,7 @@ relay manager next to the trajectory's server polls.
 
 import asyncio
 import importlib
+import json
 import os
 import re
 import time
@@ -54,6 +55,9 @@ from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import RateLimiterConfig, create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
+# Opt-in, by environment variable: SKYCAP_FAST_EXEC=1, SKYCAP_TIMING=1, SKYCAP_WAIT_WATCH=measure|return,
+# SKYCAP_TERMINAL_GUARD=1, SKYCAP_AGENT_PATH_DROP=<dirs>.
+from . import agent_path, fast_exec, loop_offload, outage_guard, terminal_guard, timing, wait_watch  # noqa: F401
 from .compose import TrialOutcome, compose, split
 from .record_index import RecordLog
 
@@ -64,6 +68,54 @@ litellm.suppress_debug_info = True
 MAX_NUM_RETRIES_PER_TRIAL = int(os.environ.get("SKYCAP_TRIAL_ATTEMPTS", "2"))
 #: SKYCAP_TRIAL_TIMEOUT_SEC: cancel an attempt that runs longer (a wedged sandbox), so it can't hold up a batch forever.
 TRIAL_TIMEOUT_SEC = float(os.environ["SKYCAP_TRIAL_TIMEOUT_SEC"]) if os.environ.get("SKYCAP_TRIAL_TIMEOUT_SEC") else None
+#: With SKYCAP_OUTAGE_GUARD=1 (outage_guard.py): the longest one trial waits out a provider outage in total, and the
+#: pause before it asks the gate again after an attempt the provider failed.
+OUTAGE_MAX_WAIT_SEC = float(os.environ.get("SKYCAP_OUTAGE_MAX_WAIT_SEC", str(6 * 3600)))
+OUTAGE_RETRY_SEC = 10.0
+#: SKYCAP_STALL_TIMEOUT_SEC: an agent timeout in which one model call took longer than this is the infrastructure's
+#: (the call was stuck between the sandbox and the model: a dropped sandbox, a lost relay message), not the
+#: policy's: it is not trained as a failure but retried / masked like any other errored attempt. Unset = off.
+STALL_TIMEOUT_SEC = float(os.environ.get("SKYCAP_STALL_TIMEOUT_SEC") or 0) or None
+#: Provider-side failures of one trial that are not counted as attempts while the gate is open (no outage declared).
+OUTAGE_FREE_RETRIES = 3
+
+#: SKYCAP_VERIFIER_RETRIES: re-run a verifier whose tests never ran (reward 0 and no pytest ctrf.json), e.g. when
+#: its test.sh failed to download uv from GitHub (a 504). Without this such a trial trains as a false 0. After the
+#: last retry it raises, so the trial is an error (retried, then masked) rather than a 0. 0 disables (default), as
+#: verifiers that never write ctrf.json would otherwise be re-run on every 0.
+VERIFIER_RETRIES = int(os.environ.get("SKYCAP_VERIFIER_RETRIES", "0"))
+VERIFIER_RETRY_BACKOFF_SEC = float(os.environ.get("SKYCAP_VERIFIER_RETRY_BACKOFF_SEC", "30"))
+
+
+class VerifierTestsDidNotRunError(RuntimeError):
+    """The verifier wrote a reward but its tests never ran (no ctrf.json), after every retry."""
+
+
+def _tests_did_not_run(trial: Trial, result: Any) -> bool:
+    rewards = getattr(result, "rewards", None) or {}
+    return not any(rewards.values()) and not (Path(trial.paths.verifier_dir) / "ctrf.json").exists()
+
+
+_original_run_shared_verifier = Trial._run_shared_verifier
+
+
+async def _run_shared_verifier_retrying(self: Trial, **kwargs: Any) -> Any:
+    for attempt in range(VERIFIER_RETRIES + 1):
+        result = await _original_run_shared_verifier(self, **kwargs)
+        if VERIFIER_RETRIES == 0 or not _tests_did_not_run(self, result):
+            return result
+        stdout = Path(self.paths.verifier_dir) / "test-stdout.txt"
+        tail = stdout.read_text(errors="ignore")[-300:] if stdout.exists() else ""
+        logger.warning(
+            f"{self.config.trial_name}: verifier tests did not run (attempt {attempt + 1}/{VERIFIER_RETRIES + 1}): "
+            f"{tail!r}"
+        )
+        if attempt < VERIFIER_RETRIES:
+            await asyncio.sleep(VERIFIER_RETRY_BACKOFF_SEC * (attempt + 1))
+    raise VerifierTestsDidNotRunError(f"verifier tests did not run after {VERIFIER_RETRIES + 1} attempts: {tail!r}")
+
+
+Trial._run_shared_verifier = _run_shared_verifier_retrying
 
 #: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
 #: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
@@ -74,6 +126,30 @@ CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceede
 CONTEXT_LENGTH_OUTPUT = re.compile(r"context\s*_length\s*_exceeded|ContextWindowExceededError")
 #: How much of the end of each agent log is searched.
 AGENT_LOG_TAIL_BYTES = 64 * 1024
+
+
+def _longest_model_call(results: Any) -> Optional[float]:
+    """Seconds of the longest model call the in-sandbox agent made, from its timing log in the trial directory
+    (``agent/timing.jsonl``, written with SKYCAP_TIMING; an interrupted call is logged with the time it had
+    waited). None when there is no such log."""
+    uri = str(getattr(results, "trial_uri", "") or "")
+    if not uri.startswith("file://"):
+        return None
+    path = Path(url2pathname(urlparse(uri).path)) / "agent" / "timing.jsonl"
+    longest = None
+    try:
+        with open(path) as f:
+            for line in f:
+                if '"k": "llm"' not in line:
+                    continue
+                try:
+                    seconds = float(json.loads(line).get("dt") or 0.0)
+                except (ValueError, TypeError):
+                    continue
+                longest = seconds if longest is None else max(longest, seconds)
+    except OSError:
+        return None
+    return longest
 
 
 def _ran_out_of_context(results: Any) -> bool:
@@ -111,6 +187,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         records: Optional[RecordLog] = None,
         include_images: bool = False,
         sandbox_relay: Optional[Dict[str, Any]] = None,
+        eval_sampling_overrides: Optional[Dict[str, Any]] = None,
+        train_on_timeouts: bool = False,
+        train_max_model_len: Optional[int] = None,
+        eval_agent_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
         Args:
@@ -125,10 +205,18 @@ class HarborSkycapGenerator(GeneratorInterface):
             sandbox_relay: ``{"port", "managers": {server URL: relay manager URL}}`` with ``skycap.sandbox_relay``:
                 an agent in its sandbox calls the stub on ``127.0.0.1:port``, which the trajectory's server's relay
                 manager polls, instead of an exposed URL.
+            eval_sampling_overrides: sampling for eval trajectories (``skycap.eval_sampling_overrides``), carried in
+                each eval trajectory's meta; skycap applies it over the server's training sampling.
+            train_on_timeouts: a timed-out trial trains with reward 0 (``skycap.train_on_timeouts``) instead of
+                masking its instance.
+            eval_agent_kwargs: agent kwargs of eval trials only (``skycap.eval_agent_kwargs``), over
+                ``harbor_trial_config.agent.kwargs``: e.g. ``{enable_summarize: true}`` for an eval that summarizes a
+                full context while a training trial ends there.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
         self.train_paths = train_paths
+        self.train_on_timeouts = train_on_timeouts
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
                 "HarborSkycapGenerator emits one row per captured path, grouped per rollout the step-wise way. "
@@ -146,6 +234,10 @@ class HarborSkycapGenerator(GeneratorInterface):
         self.inference_engine_client = inference_engine_client
         self.records = records
         self.sandbox_relay = sandbox_relay
+        self.eval_sampling_overrides = dict(eval_sampling_overrides) if eval_sampling_overrides else None
+        #: ``skycap.train_max_model_len``: the context limit of training trajectories, carried in their ``meta``.
+        self.train_max_model_len = int(train_max_model_len) if train_max_model_len else None
+        self.eval_agent_kwargs = dict(eval_agent_kwargs) if eval_agent_kwargs else None
         served = generator_cfg.inference_engine.served_model_name
         if served is None or "/" in served:
             raise ValueError("generator.inference_engine.served_model_name must be set, without '/'")
@@ -161,10 +253,15 @@ class HarborSkycapGenerator(GeneratorInterface):
             os.environ.setdefault("MSWEA_API_KEY", PLACEHOLDER_API_KEY)
         agent["model_name"] = f"hosted_vllm/{served}"
         kwargs = agent.setdefault("kwargs", {})
+        if str(agent.get("import_path") or "").endswith(":TerminusInstalled") and agent.get("override_timeout_sec"):
+            # The in-sandbox Terminus enforces the trial's agent timeout itself as well (terminus_installed.py).
+            kwargs["agent_timeout_sec"] = float(agent["override_timeout_sec"])
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
         self.include_images = include_images
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
+        #: Pauses trial starts while the sandbox provider is failing them (opt-in; None otherwise).
+        self._outage_gate = outage_guard.OutageGate() if outage_guard.ENABLED else None
         if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
             # A provider's sandboxes count against an account quota others share, and every trial of a batch
             # (eval: the whole eval set) would start one at once.
@@ -201,6 +298,7 @@ class HarborSkycapGenerator(GeneratorInterface):
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
             include_images=self.include_images,
+            train_on_timeouts=self.train_on_timeouts,
         )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output
@@ -254,24 +352,51 @@ class HarborSkycapGenerator(GeneratorInterface):
         """
         started = time.monotonic()
         missing_routes = False
-        for attempt in range(MAX_NUM_RETRIES_PER_TRIAL):
+        gate = self._outage_gate
+        outage_deadline = started + OUTAGE_MAX_WAIT_SEC
+        free_retries = 0
+        task = getattr(trajectory_id, "instance_id", None)
+        attempt = 0
+        while attempt < MAX_NUM_RETRIES_PER_TRIAL:
             prefix = f"Trajectory {trajectory_id} attempt {attempt + 1}/{MAX_NUM_RETRIES_PER_TRIAL}"
+            # A closed gate (the provider is failing sandbox creation) holds the trial here; the canary goes on.
+            canary = await gate.enter() if gate is not None else False
+            info: Dict[str, Any] = {}
             attempts.start()
             try:
-                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, phase, attempt, attempts)
+                outcome = await self._attempt(prompt, trajectory_id, cache_salt, step, phase, attempt, attempts, info)
             except PathRuleError as error:
                 logger.error(f"{prefix}: path rule {self.train_paths!r} failed, not retrying: {error}")
                 attempts.fail(error)
+                if gate is not None:
+                    gate.report(False, canary, task)
                 break
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 attempts.fail(error)
+                if gate is not None:
+                    gate.report(False, canary, task)
+                attempt += 1
                 continue
+            if gate is not None:
+                outage = bool(info.get("outage"))
+                gate.report(outage, canary, task)
+                free = gate.closed or free_retries < OUTAGE_FREE_RETRIES
+                if outage and outcome.stop_reason == "error" and free and time.monotonic() < outage_deadline:
+                    # The provider failed before the sandbox existed: not this trial's failure, and not one of its
+                    # attempts while an outage is declared (a few times otherwise). It goes back to the gate (its
+                    # trial time starts over).
+                    free_retries += 0 if gate.closed else 1
+                    logger.warning(f"{prefix}: the provider failed before the sandbox came up; waiting, attempt not counted")
+                    await asyncio.sleep(OUTAGE_RETRY_SEC)
+                    started = time.monotonic()
+                    continue
             outcome.e2e_time = time.monotonic() - started
             if outcome.stop_reason != "error":
                 return outcome
             missing_routes = missing_routes or outcome.missing_routes
             logger.warning(f"{prefix} produced nothing to train on")
+            attempt += 1
         return TrialOutcome(
             trajectory_id=trajectory_id,
             stop_reason="error",
@@ -288,8 +413,11 @@ class HarborSkycapGenerator(GeneratorInterface):
         phase: str,
         attempt: int,
         attempts: TrialAttempts,
+        info: Optional[Dict[str, Any]] = None,
     ) -> TrialOutcome:
-        """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces."""
+        """One attempt on its own trajectory, so a retry never shares a graph with the attempt it replaces.
+
+        ``info``, when given, receives ``outage``: whether the provider failed the attempt before its sandbox existed."""
         meta = {
             "task": str(prompt),
             "instance_id": str(trajectory_id.instance_id),
@@ -297,6 +425,10 @@ class HarborSkycapGenerator(GeneratorInterface):
             "step": step,
             "attempt": attempt,
         }
+        if phase == "eval" and self.eval_sampling_overrides:
+            meta["sampling_overrides"] = dict(self.eval_sampling_overrides)
+        if phase != "eval" and self.train_max_model_len:
+            meta["max_model_len"] = self.train_max_model_len
         trajectory = None
         try:
             # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
@@ -305,13 +437,25 @@ class HarborSkycapGenerator(GeneratorInterface):
                 config = self._trial_config(
                     prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key, self._relay_kwargs(trajectory)
                 )
+                if phase == "eval" and self.eval_agent_kwargs:
+                    config["agent"]["kwargs"].update(deepcopy(self.eval_agent_kwargs))
                 trial = await Trial.create(TrialConfig.model_validate(config))
                 results = await asyncio.wait_for(trial.run(), TRIAL_TIMEOUT_SEC)
 
                 attempts.record(results)
+                if info is not None:
+                    info["outage"] = outage_guard.is_outage_result(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
-                if exception == "AgentTimeoutError":
-                    # Masked, not retried, as the sibling does.
+                stalled = None
+                if exception == "AgentTimeoutError" and STALL_TIMEOUT_SEC is not None:
+                    stalled = await asyncio.to_thread(_longest_model_call, results)
+                if stalled is not None and stalled > STALL_TIMEOUT_SEC:
+                    # The agent spent its time waiting for one model call that never came back: not a rollout the
+                    # policy failed. An error (retried, then masked), not a reward-0 timeout.
+                    reward, stop_reason = 0.0, "error"
+                    logger.warning(f"Trajectory {trajectory_id} timed out with a model call stuck for {stalled:.0f} s: infrastructure, not trained as a failure")
+                elif exception == "AgentTimeoutError":
+                    # Not retried, as the sibling does; masked (its whole instance) unless train_on_timeouts.
                     reward, stop_reason = 0.0, "agent_timeout"
                 elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.

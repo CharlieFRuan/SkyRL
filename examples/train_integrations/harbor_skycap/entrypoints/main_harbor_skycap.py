@@ -127,6 +127,24 @@ class SkycapConfig:
     (default; a turn re-rendered without its thinking would differ from what was sampled and fork the graph),
     ``tool_cycle``, or null for what the model's chat template keeps (e.g. Qwen3.5 drops the thinking before the last
     user message), to match a stock vLLM server."""
+    train_max_model_len: Optional[int] = None
+    """Context limit of training trajectories, when it is below the engines' ``max_model_len`` (which evals then
+    use in full): e.g. 131072 for training with engines serving 262144. A training trajectory whose prompt reaches it
+    gets the same context-length error it would get at the engine's limit."""
+    max_tokens_per_turn: Optional[int] = None
+    """Cap on one model reply's tokens, for every trajectory (skycap's ``max_tokens`` sampling override). None: a
+    reply may use all the context that is left, so a model stuck repeating itself fills it. A reply that hits the cap
+    finishes with ``length``; Terminus-2 then tells the model its output was too long and asks again."""
+    eval_agent_kwargs: Optional[Dict[str, Any]] = None
+    """Agent kwargs of eval trials only, over ``harbor_trial_config.agent.kwargs`` (e.g. ``{enable_summarize: true}``:
+    an eval summarizes a full context and goes on, while a training trial ends there)."""
+    eval_sampling_overrides: Optional[Dict[str, Any]] = None
+    """Sampling for eval trajectories (e.g. ``{temperature: 0.6, top_p: 0.95, top_k: 20}``), applied by skycap over
+    the training sampling (``generator.sampling_params``, which every training rollout uses so rollout and trainer
+    logprobs agree). None: eval samples like training."""
+    train_on_timeouts: bool = False
+    """Train a trial that hit Harbor's agent timeout with reward 0, like a context-length one. False (the sibling's
+    rule): mask every rollout of its prompt, which with long tasks masks most groups."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -175,6 +193,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
             "top_p": sampling.top_p,
             "top_k": sampling.top_k,
             "min_p": sampling.min_p,
+            **({"max_tokens": int(cfg.skycap.max_tokens_per_turn)} if cfg.skycap.max_tokens_per_turn else {}),
         },
         "sampling_mask": ie.enable_return_sample_support_set,
         "use_raw_content": cfg.skycap.use_raw_content,
@@ -249,6 +268,12 @@ class HarborSkycapExp(HarborExp):
             train_paths=cfg.skycap.train_paths,
             records=self.records,
             include_images=cfg.skycap.include_images,
+            eval_sampling_overrides=(
+                dict(cfg.skycap.eval_sampling_overrides) if cfg.skycap.eval_sampling_overrides else None
+            ),
+            train_on_timeouts=cfg.skycap.train_on_timeouts,
+            train_max_model_len=cfg.skycap.train_max_model_len,
+            eval_agent_kwargs=dict(cfg.skycap.eval_agent_kwargs) if cfg.skycap.eval_agent_kwargs else None,
             sandbox_relay=(
                 {"port": cfg.skycap.sandbox_relay.port, "managers": dict(zip(self.skycap.urls, self.skycap.relay_urls))}
                 if cfg.skycap.sandbox_relay.enabled

@@ -417,6 +417,23 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
 
 
 @pytest.mark.asyncio
+async def test_with_train_on_timeouts_a_timeout_trains_with_reward_zero_and_its_siblings_keep_theirs(
+    skycap, trials, generator
+) -> None:
+    gen = generator()
+    gen.train_on_timeouts = True
+    out = await gen.generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+    validate_generator_output(4, out, step_wise=True)
+
+    timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
+    assert timed_out and all(sum(out["loss_masks"][i]) > 0 and out["rewards"][i] == 0.0 for i in timed_out)
+    assert all(out["stop_reasons"][i] == "agent_timeout" for i in timed_out)
+    metrics = out["rollout_metrics"]
+    assert metrics["generate/skycap/num_masked_instances"] == 0
+    assert metrics["generate/skycap/num_timeout_trajectories"] == 2
+
+
+@pytest.mark.asyncio
 async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_length_trial(
     skycap, trials, generator
 ) -> None:

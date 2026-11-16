@@ -134,7 +134,9 @@ def setup_command(port: int, secret: str, client_dir: Optional[str] = None) -> s
         f"printf '%s' {shlex.quote(conf)} > {d}/conf.json\n"
         "PY=''; if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))'"
         " 2>/dev/null; then PY=$(command -v python3); fi\n"
-        f'if [ -z "$PY" ] && [ -x {RELAY_DIR}/bin/uv ]; then PY=$({RELAY_DIR}/bin/uv python find 3.12 2>/dev/null || true); fi\n'
+        # Where stub_start_command had uv put it (UV_PYTHON_INSTALL_DIR): uv doesn't look there on its own.
+        f'if [ -z "$PY" ] && [ -x {RELAY_DIR}/bin/uv ]; then PY=$(UV_PYTHON_INSTALL_DIR={RELAY_DIR}/python'
+        f' {RELAY_DIR}/bin/uv python find 3.12 2>/dev/null || true); fi\n'
         'if [ -z "$PY" ]; then echo "@@NOPY@@"; exit 1; fi\n'
         f'"$PY" -S -E {d}/rx.py health\n'
         'echo "@@PY $PY@@"'
@@ -287,6 +289,7 @@ class ExecRelayManager(SandboxRelayManager):
             await transport.setup()
         except Exception as error:  # noqa: BLE001 - the environment fails the trial on a non-200
             self._stats["setup_errors"] += 1
+            self._note_error("setup", str(body.get("key")), error)
             return web.json_response({"ok": False, "error": f"{type(error).__name__}: {error}"}, status=502)
         self._transports[key] = transport
         self._pollers[key] = asyncio.ensure_future(self._exec_poll(key, transport, body["target"].rstrip("/")))
@@ -332,6 +335,7 @@ class ExecRelayManager(SandboxRelayManager):
                     raise
                 except Exception as error:  # noqa: BLE001 - the sandbox may be starting, busy or gone
                     self._stats["poll_errors"] += 1
+                    self._note_error("poll", key, error)
                     now = time.monotonic()
                     failing_since = failing_since or now
                     if now - failing_since > self.give_up_after:
@@ -384,6 +388,7 @@ class ExecRelayManager(SandboxRelayManager):
                 }
         except Exception as error:  # noqa: BLE001 - answer the agent with an error rather than leave it hanging
             self._stats["call_errors"] += 1
+            self._note_error("forward", key, error)
             message = f"sandbox relay: skycap call failed: {type(error).__name__}: {error}"
             reply = {
                 "id": call["id"],
@@ -398,6 +403,7 @@ class ExecRelayManager(SandboxRelayManager):
                     break
                 raise ExecError(f"reply HTTP {status}")
             except Exception as error:  # noqa: BLE001
+                self._note_error("reply", key, error)
                 if attempt == 4:
                     logger.warning(f"sandbox relay {key}: could not deliver reply {call['id']}: {error}")
                     self._stats["call_errors"] += 1

@@ -16,9 +16,34 @@ once their time is up. Use it in place of ``type: daytona``:
 
 import argparse
 import asyncio
+import os
 from typing import Any, Dict, Optional
 
 from harbor.environments.daytona import DaytonaEnvironment
+
+#: SKYCAP_CREATE_TIMEOUT_SEC: give up on one sandbox creation after this many seconds, so that Harbor's retry
+#: creates another one (unset: Harbor's own limit, the task's ``build_timeout_sec``). For orgs whose sandboxes start
+#: from ready snapshots in seconds: on 2026-11-15 one broken Daytona runner took ~3% of our creates and held each
+#: for ~900 s before reporting an error, after which the retry (elsewhere) succeeded in seconds; a sandbox in the
+#: CREATING state cannot be deleted from outside ("Sandbox state change in progress"). Do not set it where a
+#: creation may build or pull an image. The abandoned sandbox ends in the ERROR state and is removed by the label
+#: cleanup or its ``ttl_minutes``.
+CREATE_TIMEOUT_SEC = float(os.environ.get("SKYCAP_CREATE_TIMEOUT_SEC") or 0) or None
+
+
+class _ShortCreate:
+    """A Daytona client whose ``create`` never waits longer than ``limit`` seconds; everything else is the client."""
+
+    def __init__(self, client: Any, limit: float) -> None:
+        self._client, self._limit = client, limit
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+    async def create(self, params: Any = None, *, timeout: float = 60, **kwargs: Any) -> Any:
+        # The SDK raises DaytonaTimeoutError (a DaytonaError, which Harbor's creation retry retries).
+        limit = min(timeout, self._limit) if timeout else self._limit
+        return await self._client.create(params=params, timeout=limit, **kwargs)
 
 
 class LabelledDaytonaEnvironment(DaytonaEnvironment):
@@ -36,6 +61,10 @@ class LabelledDaytonaEnvironment(DaytonaEnvironment):
         params.labels = {**(params.labels or {}), **self._labels}
         if self._ttl_minutes is not None:
             params.ttl_minutes = self._ttl_minutes
+        if CREATE_TIMEOUT_SEC is not None:
+            if daytona is None:
+                daytona = await self._client_manager.get_client()
+            daytona = _ShortCreate(daytona, CREATE_TIMEOUT_SEC)
         await super()._create_sandbox(params=params, daytona=daytona)
 
 
