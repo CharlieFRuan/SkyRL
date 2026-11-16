@@ -209,7 +209,7 @@ SkyCap with the SkyRL entrypoint):
 - sampling temperature 1.0, top_p 1.0, top_k off (the training sampling; the card recommends top_p 0.95, see the
   table below);
 - **no summarization** (`enable_summarize: false`), **thinking kept in the history**
-  (`truncate_history_thinking=false`, `thinking_retention=all`);
+  (`skycap.thinking_retention=all`; see the correction in 1.2 for what that does and does not cover);
 - Terminus 2 inside the sandbox through the relay, one reply capped at 16,384 tokens, 262,144 context, agent
   timeout 3,600 s, sandboxes 4 vCPU / 8 GiB / 20 GiB on Dune, TB2.1 `tbench21_4cpu` (commit `7131e43` with the
   two task patches);
