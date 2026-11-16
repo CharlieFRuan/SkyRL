@@ -59,13 +59,25 @@ sandbox), `sandbox_relay/` (model calls from the sandbox to the cluster: `exec` 
 `outage_guard.py`, `loop_offload.py`, `timing.py`, `compose.py`, `run_fully_async_terminus.sh` (the launcher),
 `entrypoints/main_harbor_skycap_fully_async.py`.
 
-Data (rebuilt by `ops/calibforge_rl_1110/setup_data.sh`; `$D` is the node-local work directory):
+Data: **use the exact task sets of the Qwen runs**, uploaded on 11-15 to the private Hugging Face dataset
+`CharlieFRuan/calibforge-v2-harbor-tasks` (its README has checksums and provenance). `$D` is the node-local work
+directory.
+
+```bash
+huggingface-cli download CharlieFRuan/calibforge-v2-harbor-tasks --repo-type dataset --local-dir $D/data/_dl
+tar xzf $D/data/_dl/calibforge_v2_train48.tar.gz -C $D/data   # sha256 01fd0f0e...2d711f
+tar xzf $D/data/_dl/tbench21_4cpu.tar.gz -C $D/data           # sha256 7a499fca...7ab3d16
+```
 
 - `calibforge_v2_train48`: CalibForge v2, 2,788 tasks, every sandbox 4 vCPU / 8 GiB / 20 GiB, each task's own
-  prebuilt image `aweaiteam/calibforge:<task>`. Source: split `calibforge_clean_v2` of the Hugging Face dataset
-  `Fzz1/tb-full-data` (`data/tasks-calibforge_clean_v2.tar`, 471 MB; `ops/rdl.py` downloads it).
-- `tbench21_4cpu`: Terminal-Bench 2.1 (commit `7131e43`), 89 tasks at 4 vCPU / 8 GiB / 20 GiB, plus two patches:
-  `fix_qemu_apt.sh` (two Debian-bullseye tasks whose tests could not install curl) and `fix_no_ctrf.py`.
+  prebuilt image `aweaiteam/calibforge:<task>`; 4 tasks dropped and the tasks whose tests never wrote a result
+  file already patched.
+- `tbench21_4cpu`: Terminal-Bench 2.1 (commit `7131e43`), 89 tasks at 4 vCPU / 8 GiB / 20 GiB, with the two
+  Debian-bullseye tasks already patched so their tests can install curl. Keep it private.
+
+Do not rebuild them with `ops/calibforge_rl_1110/setup_data.sh` unless the download is impossible: the rebuild
+needs access to someone else's source dataset and does not apply the result-file patch (`fix_no_ctrf.py` was run
+by hand), so it would not match the Qwen runs.
 
 ### Keys the launchers expect
 
@@ -75,7 +87,7 @@ Two files in `$D`, mode 600, sourced by `run_rl.sh` and never printed:
 |---|---|---|
 | `$D/dune_keys.env` | `DAYTONA_API_KEY`, `DAYTONA_API_URL` | every sandbox (Dune speaks Daytona's API at its own URL). Required |
 | `$D/keys.env` | `WANDB_API_KEY` | logging to the W&B entity above. Required |
-| | `HF_API_KEY` (exported as `HF_TOKEN`) | the Nemotron weights and tokenizer, the CalibForge task tarball (the token's account needs access to that dataset), private uploads of traces. Required |
+| | `HF_API_KEY` (exported as `HF_TOKEN`) | the Nemotron weights and tokenizer, the private task dataset `CharlieFRuan/calibforge-v2-harbor-tasks` (the user's own token can read it), private uploads of traces. Required |
 | | `GH_TOKEN` | only if the agent is to push; this branch and Harbor are public |
 
 Not needed: any other Daytona key (the two Daytona orgs of the Qwen runs are not used here). Still to decide on
