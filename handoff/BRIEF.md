@@ -252,7 +252,18 @@ Purpose: prove the Nemotron + Terminus + in-sandbox pipeline learns at all, and 
 - Tasks: 32 CalibForge tasks the base model solves sometimes (pass rate roughly 0.2-0.8). Pick them from a
   one-pass generation scan over a few hundred tasks with Nemotron (the eval-only entrypoint), not from Qwen's
   history. Exclude tasks whose verifier or setup is flaky.
-- Same recipe as the full run (1.5) except the task set repeats every step: batch 32 x 16.
+- **Use the synchronous launcher, `examples/train_integrations/harbor_skycap/run_sync_terminus.sh`** (added
+  11-15 evening; the first version of this brief did not say so). With 32 tasks the fully async trainer cannot
+  be used: one group dropped by the zero-variance filter ends the epoch on a partial batch, which is discarded.
+  Every earlier overfit here was synchronous: each step generates the whole batch on the current weights and
+  trains on it, `TRAIN_BATCH_SIZE=32` (= the number of tasks, so one step is one epoch), `GROUP_SIZE=16`,
+  `EPOCHS=15` (= the number of steps); the filter only removes zero-variance groups from that step's loss. The
+  rest of the recipe is the full run's (1.5).
+- The sync launcher defaults to the on-cluster agent and Qwen settings: append the overrides `run_rl.sh` adds
+  to the async launcher (in-sandbox `TerminusInstalled`, exec relay environment, 3,600 s timeout, reply cap,
+  `model_info` limits, the `SKYCAP_*` opt-ins) plus the Nemotron settings of 1.2. Sync with the in-sandbox agent
+  has not been run before; treat the first step as a test.
+- Reference: the Qwen3.5-9B sync overfit of 11-08 (32 tasks x 12, LR 1.5e-6) went ~0.48 -> ~0.59 in 20 steps.
 - Watch per step: raw reward and pass@16, policy entropy, clip ratio, logprob gap, trajectory length, timeouts
   and out-of-context counts, grad norm.
 
