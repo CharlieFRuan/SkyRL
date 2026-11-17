@@ -1,0 +1,18 @@
+# mini-swe-agent config for RL training Nemotron-3.5-Lightning-30B-A3B on SWE tasks through skycap
+# (run_fully_async_qwen36_mini_swe.sh with MODEL_FAMILY=nemotron-3.5). Same as mini_swe_agent_nemotron35.yaml (the eval
+# config) plus a step limit. Sampling here is overridden by the trainer (skycap forces generator.sampling_params), and
+# the chat template options by skycap.chat_template_kwargs.
+agent:
+  step_limit: 250
+  cost_limit: 0
+environment:
+  timeout: 600
+model:
+  model_kwargs:
+    drop_params: true
+    temperature: 1.0
+    max_tokens: 16384
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+        truncate_history_thinking: false
