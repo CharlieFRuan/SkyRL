@@ -41,8 +41,9 @@ independently from Lila; the public JSC status page could not be read by an auto
 - Maintenance: JUWELS Booster is down from 2026-11-24 09:00 CET to 2026-11-30 09:00 CET (software updates and a
   Slurm upgrade to 25.11), per the login message of the day and the Slurm reservation `maint_booster`. At 06:47 CET
   on 11-24 it had not started. The JUWELS session may be unreachable in that window.
-- Nothing was uploaded from JUWELS. **The 26 checkpoints (117 GB each) exist only on JUWELS scratch, which removes
-  files not used for 90 days (late February 2027).**
+- Nothing was uploaded from JUWELS. On 2026-11-24 the owner had the unevaluated checkpoints deleted (22 directories,
+  about 2,574 GiB). **Kept: `global_step_25, 50, 75, 100, 104, 110, 115, 120` of the reported run (936 GiB), on
+  JUWELS scratch only, which removes files not used for 90 days (late February 2027).**
 
 ## 3. Where the earlier Qwen3.5-9B context is
 
@@ -224,8 +225,8 @@ Exact layout, memory limits, costs and the full run list with W&B ids: appendix 
 - **Shared-org etiquette**: at most two training runs in total on the Daytona RL org (owner's rule of 11-21); label
   every sandbox with owner and run; delete only by both labels; no image builds or new snapshots on the RL org;
   TB2.1 cannot run on the RL org, so evals went to Dune.
-- **Checkpoints** are 117 GB each on JUWELS; kept: every multiple of 5 up to 120, plus 52 and 104 (the two epoch
-  ends). Scratch only, 90-day removal; paths in appendix A2.
+- **Checkpoints** are 117 GB each on JUWELS. After the 11-24 cleanup only the eight evaluated ones remain (25, 50,
+  75, 100, 104, 110, 115, 120); scratch only, 90-day removal; paths in appendix A2.
 - **JUWELS specifics**: compute nodes have no internet (a CONNECT proxy on a login node carries sandbox, W&B and
   storage traffic); the venv is unpacked to /dev/shm on every node; a 3-epoch run writes millions of trial files
   and exhausted the first scratch project's inode quota on 11-22 (finished trial dirs are now packed into tar
@@ -236,9 +237,9 @@ Exact layout, memory limits, costs and the full run list with W&B ids: appendix 
 1. Nothing needs restarting: the run is complete for its purpose. Do not resume training past 120 unless the owner
    asks; if a longer run is wanted, stop at the end of epoch 2 or add a stop rule on the share of trials at the turn
    limit and on parse errors.
-2. **Copy the checkpoints worth keeping off JUWELS scratch before late February 2027** (90-day removal; nothing was
-   uploaded). The end-of-epoch-2 checkpoint (`global_step_104`) is the one to keep and build on; 100 is the last
-   one before the looping shows in training.
+2. The eight kept checkpoints are on JUWELS scratch only (90-day removal, late February 2027; nothing was uploaded;
+   the owner said on 11-23 that they are not needed). If one is wanted after all, `global_step_104` (end of epoch 2)
+   is the one to build on; 100 is the last one before the looping shows in training.
 3. Re-run the evals of 100, 110 and 120 with 12 engines if a clean third-epoch curve is wanted (they were served
    slowly, worth about 0.03). For any comparison with the Lila numbers use 12 engine nodes per eval.
 4. Push the fixes that are still local: `bound_session_calls` (JUWELS), the Daytona task conversion scripts and the
@@ -246,8 +247,8 @@ Exact layout, memory limits, costs and the full run list with W&B ids: appendix 
 5. Open question for the owner: whether the two-run limit on the Daytona RL org also covers evals on the Daytona
    eval org (never answered; JUWELS ran its evals on Dune instead).
 6. Investigate the third-epoch looping failure before any recipe with more than two epochs.
-7. The owner's stop at 120 steps reached JUWELS only as a relay through Lila; the JUWELS session acted on it but
-   notes that it was never typed there. First steps on JUWELS after the maintenance are listed in appendix A6.
+7. The owner confirmed the stop at 120 steps on 11-23 ("I want to stop and call it a day"). First steps on JUWELS
+   after the maintenance are listed in appendix A6.
 
 ---
 
@@ -318,13 +319,14 @@ to 13.0.88 (the first training step fails otherwise); ray[default] for GPU metri
 | Run | W&B id(s) | Dates (CET) | Steps | Checkpoints | Why it ended |
 |---|---|---|---|---|---|
 | `qwen35-cf-v2-juw-smoke2-1120`, `...-b32-lr2e-6-e2e-1120`, `-e2e2-`, `-e2e3-` | 4i11a0yu, 2ibxu4nj, q1a93c2g, 9smy5i4v | Nov 20 | 0-1 | none kept | Bring-up: engine count and memory layout (8 and 10 engines collapsed) |
-| `qwen35-cf-v2-juw-b32-lr2e-6-e2e4-1120` | zdrrfumb, ekvqlkmg | Nov 20 | 3 (step-0 TB2.1 x3: 0.2322, pass@3 0.3596) | global_step_2 | Validation of the recipe on 28 nodes incl. checkpoint + resume; done |
-| `qwen35-cf-v2-juw-3600-cap16k-t1-b32-lr2e-6-1120` (Dune) | s90fdctg, wsc6gsv9 | Nov 20 21:37 - Nov 21 05:12 | 15 (mean reward 0.422; Lila 0.420) | 5, 10, 15 | Dune sandbox DNS outage on Nov 21 from 04:29; owner: switch to Daytona, start fresh |
+| `qwen35-cf-v2-juw-b32-lr2e-6-e2e4-1120` | zdrrfumb, ekvqlkmg | Nov 20 | 3 (step-0 TB2.1 x3: 0.2322, pass@3 0.3596) | global_step_2 (deleted 11-24) | Validation of the recipe on 28 nodes incl. checkpoint + resume; done |
+| `qwen35-cf-v2-juw-3600-cap16k-t1-b32-lr2e-6-1120` (Dune) | s90fdctg, wsc6gsv9 | Nov 20 21:37 - Nov 21 05:12 | 15 (mean reward 0.422; Lila 0.420) | 5, 10, 15 (deleted 11-24) | Dune sandbox DNS outage on Nov 21 from 04:29; owner: switch to Daytona, start fresh |
 | `qwen35-cf-v2-juw-daytona-ramp300-1121`, `-dtn-smoke5-`, `-dtn-smoke5b-`, `-dtneval-smoke3-`, `-dtneval-smoke3b-` | n716dibk, ri6mxc07, 4roapcxa, 14gq9hpo, 381yty15 | Nov 21 | 0 | none | Daytona smokes (relay over preview URLs through the proxy) |
-| **`qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121`** (Daytona; the reported run) | **lt61lhgd** (steps 1-45), eu12glcn (46-80), f135co7d (restart that hit the inode quota), 8oi0b4ee (81-120) | Nov 21 06:16 - Nov 23 19:29 | **120** | every 5 from 5 to 120, plus 52 and 104 (epoch ends; global_step_104 = 103 trained steps = end of epoch 2). 117 GB each, 26 in all | Stopped on the owner's relayed instruction; Booster maintenance from Nov 24 |
+| **`qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121`** (Daytona; the reported run) | **lt61lhgd** (steps 1-45), eu12glcn (46-80), f135co7d (restart that hit the inode quota), 8oi0b4ee (81-120) | Nov 21 06:16 - Nov 23 19:29 | **120** | every 5 from 5 to 120, plus 52 and 104 (epoch ends; global_step_104 = 103 trained steps = end of epoch 2), 117 GB each. After the 11-24 cleanup: 25, 50, 75, 100, 104, 110, 115, 120 kept, the other 18 deleted | Stopped on the owner's relayed instruction; Booster maintenance from Nov 24 |
 
-Checkpoint paths: `$SCR/runs/qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121/ckpts/global_step_N` (N <= 80 are symlinks into
-`$SCR_OLD/runs/<same run>/ckpts/`). **Scratch only; the site removes scratch files not used for 90 days.**
+Checkpoint paths (the eight kept ones): `$SCR/runs/qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121/ckpts/global_step_N` (25,
+50 and 75 are symlinks into `$SCR_OLD/runs/<same run>/ckpts/`). The three checkpoint-104 eval run dirs also hold a
+by-product `ckpts/global_step_105` each (117 GB). **Scratch only; the site removes scratch files not used for 90 days.**
 
 **Evals (TB2.1 x5 on Dune; run dirs `$SCR/runs/<run>`, base under `$SCR_OLD/runs` + a tar archive)**
 
@@ -465,8 +467,7 @@ JUWELS-only scripts in `$WORK` (not in any repo):
 
 ### A6. Open, and what to do first after Nov 30 (the JUWELS session's list)
 
-1. The owner has not confirmed in the JUWELS session itself the relayed instruction to stop at 120 steps (the
-   session acted on it; training stays stopped).
+1. Closed: the owner confirmed the stop at 120 steps on 11-23; training stays stopped.
 2. Decide whether to continue: more training from global_step_100 / 104 (before the looping) or 120, with a change
    against the early end token (not designed yet), under a new run name containing "juw". Not started.
 3. Matched-speed evals (12 engines) exist only for checkpoint 104; 25 / 50 / 75 / 100 / 110-120 ran with 5 engines.
@@ -475,8 +476,9 @@ JUWELS-only scripts in `$WORK` (not in any repo):
 5. First steps after the maintenance: read `$WORK/PLAN.md` (tail) and `$WORK/FINDINGS.md`; sbatch a hold
    (`--gres=gpu:4` is already there); start the proxy (the login node may differ; it writes a new proxy env file);
    provider probe; then `juwels/eval_launch_juw.sh <hold> <offset> <count> <N> 110`, or a training launch.
-6. **Checkpoints are on scratch only (117 GB each, 26 of them); copy the ones worth keeping before the 90-day limit
-   (late February 2027).**
+6. The 8 kept checkpoints (25, 50, 75, 100, 104, 110, 115, 120; 117 GB each) are on scratch only; the 90-day limit
+   (late February 2027) still applies. The other 22 checkpoint directories were deleted on 11-24 on the owner's
+   typed instruction.
 
 ### A7. Log and result files on JUWELS
 
