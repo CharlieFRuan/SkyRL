@@ -23,7 +23,7 @@ Source of truth for every number: the dated log `ops/calibforge_rl_1110/PLAN.md`
 ## 1. Bottom line
 
 - With every recipe that stayed stable, Nemotron gained **about +0.02 to +0.06 reward on the tasks it trained on**
-  after 40 to 60 steps (4 to 6 visits of a 512-task set), **about +0.03 on held-out CalibForge tasks**, and at best
+  after 35 to 60 steps (4 to 6 visits of a 512-task set; +0.02 to +0.04 for three of the four such runs), **about +0.03 on held-out CalibForge tasks**, and at best
   **about +0.03 on TB2.1** (0.266-0.270 at steps 75-100 against a base of 0.237, 2 SE, then back to 0.251 at step
   114). More training did not add more.
 - Qwen3.5-9B on the same stack and task set went from about 0.25 to 0.33-0.37 on TB2.1 in about 100 steps, and
@@ -165,21 +165,23 @@ runs out of context on more of the rest. Trials at >= 240 of 250 turns stayed at
 
 | Run / arm | W&B | Recipe | Steps, end | Result |
 |---|---|---|---|---|
-| `nemo-jup-of16x8-lr5e-6-1117` (overfit) | - | full-run recipe | 8 | 0.605 -> 0.661, ~1.4 SE |
-| J-r2 `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2` | - | 4e-6 / rollout_is / prompt_mean / no R3 / frozen / full | 40, stopped on entropy rule | entropy 0.06 -> 0.17 (26-30) -> 0.63 (40); clean reward 0.53 -> 0.62 then falling; TB2.1 (8 engines): step 25 0.292, step 35 0.2472 (base 0.2472) |
-| H-r2 `nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118-r2` | - | same with **DPPO** | 35, walltime | entropy flat 0.052-0.060, clean reward flat; TB2.1 step 25: 0.258 |
-| k4 | - | stock thinking flow | ~24 | reward 0.28-0.35 vs 0.43-0.47 with thinking kept |
-| `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3-1119` | `ai4sqcle` | J-r2 + R3 | 26, parked | gap 0.011 (0.045 without R3), entropy 0.056-0.066, clean reward 0.54 -> 0.56 |
-| `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3sc-1120` | `53bp1o04` | R3 + score centering | 5, retired | too short to read |
-| `nemo-jup-cf-v2-b32-lr4e-6-ris-rfrz-r3-1121` | - | R3, mixers trained, full set | 15, stopped | +0.012 +- 0.014 vs frozen at 11-15; entropy 0.075 vs 0.060 |
-| rv512 A `nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121` | - | **1e-5**, prompt_mean, R3, frozen, 512 tasks | 19, stopped | visit 2 vs base -0.033 +- 0.008; A - C -0.035 +- 0.007 |
-| rv512 B `...-lr4e-6-ris-rfrz-r3-1121` | - | 4e-6, router only frozen | 21, stopped | B - C at visit 2 +0.005 +- 0.006; entropy 0.067 -> 0.087 |
-| rv512 C `...-lr4e-6-ris-frz-r3-1121` (reference arm) | - | 4e-6, prompt_mean, R3, frozen | 51, **killed 11-23** | vs base: -0.006, +0.003, +0.012 +- 0.006, **+0.022 +- 0.006 (visit 4)**; context share flat 0.16-0.17; entropy 0.073-0.088 at steps 42-51 |
-| rv512 D2 `...-lr4e-6-ris-nofrz-r3-1122b` | - | 4e-6, **nothing frozen**, R3 | 23, entropy guard | D2 - C: +0.001 +- 0.005, +0.001 +- 0.006, -0.025 +- 0.011 (partial); context share 0.165 -> 0.231 -> 0.317; entropy 0.055 -> 0.115; fewer, much longer replies |
-| rv512 E `...-lr4e-6-ris-frz-r3-seqm-1122` | - | 4e-6, **sequence_mean**, R3, frozen | 35, **killed 11-23** | vs base: -0.001, +0.005, +0.024 +- 0.007, +0.038 +- 0.008 (visit 4, partial 363 tasks); E - C +0.013 +- 0.006 at visit 3; context +0.022 +- 0.006; 7 fewer turns, +341 reply tokens per turn; entropy flat 0.061-0.065 |
+| `nemo-jup-of16x8-lr5e-6-1117` (overfit; three earlier 32-task overfits in appendix C2) | `5ciahmo7` | full-run recipe | 8 | 0.605 -> 0.661, ~1.4 SE |
+| `nemo-jup-cf-v2-b32-lr2e-6-1117` (control, twin of Horizon's first full run) | `1h2s9nt6`, `lx4apacy`, `wuomk3ka` | 2e-6 / DPPO / prompt_mean / no R3 / nothing frozen | 37 (checkpoint 35) | reward flat (0.454 -> 0.469 over 24 steps); entropy 0.053-0.064 to step 30, then 0.068 -> 0.079 by 37 |
+| A/B arms from the control's checkpoint 30 (`...-ab30-nolb`, `-frz`, `-rollis`, `-mzf-1118`) | appendix C3 | 2e-6; one change each: balancer off / router frozen / rollout_is / router + Mamba mixers at LR 0 | 37-50 | balancer off, router-only freeze and rollout_is did not slow the entropy rise (rollout_is: 0.128 at 48-50); **freezing mixers + router held it at 0.071 with reward 0.512 vs 0.457**. This is where the freeze recipe came from |
+| J-r2 `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2` | `1nvvf22s`, `lce9kfit`, `uufisuec` | 4e-6 / rollout_is / prompt_mean / no R3 / frozen / full | 40, stopped on entropy rule | entropy 0.06 -> 0.17 (26-30) -> 0.63 (40); clean reward 0.53 -> 0.62 then falling; TB2.1 (8 engines): step 25 0.292, step 35 0.2472 (base 0.2472) |
+| H-r2 `nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118-r2` | `lq60kl2k`, `p0tanb8t` | same with **DPPO** | 35, walltime | entropy flat 0.052-0.060, clean reward flat; TB2.1 step 25: 0.258 |
+| k4 `nemo-jup-of16x8-ris-nolb-trdefault-lr4e-6-1118-k4` | `riblvyjy`, `s19thxfo`, `1jnxn9ig` | 16x8 overfit, stock thinking flow, 4 turns trained per trajectory | 24 | reward 0.28-0.35 vs 0.43-0.47 with thinking kept |
+| `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3-1119` | 7 ids incl. `ai4sqcle` (appendix C4) | J-r2 + R3 | 26, parked | gap 0.011 (0.045 without R3), entropy 0.056-0.066, clean reward 0.54 -> 0.56 |
+| `nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3sc-1120` | `53bp1o04` + 3 (appendix C4) | R3 + score centering | 5, retired | too short to read |
+| `nemo-jup-cf-v2-b32-lr4e-6-ris-rfrz-r3-1121` | `njfw5njk`, `x1ywhr7t` | R3, mixers trained, full set | 15, stopped | +0.012 +- 0.014 vs frozen at 11-15; entropy 0.075 vs 0.060 |
+| rv512 A `nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121` | `2k1cr4e8`, `95gylg9a`, `bp6lp84f` | **1e-5**, prompt_mean, R3, frozen, 512 tasks | 19, stopped | visit 2 vs base -0.033 +- 0.008; A - C -0.035 +- 0.007 |
+| rv512 B `...-lr4e-6-ris-rfrz-r3-1121` | `xjyq09u0`, `wak64a1y` | 4e-6, router only frozen | 21, stopped | B - C at visit 2 +0.005 +- 0.006; entropy 0.067 -> 0.087 |
+| rv512 C `...-lr4e-6-ris-frz-r3-1121` (reference arm) | 6 ids, first `1heg2a7d`, last `j0vajcij` | 4e-6, prompt_mean, R3, frozen | 51, **killed 11-23** | vs base by visit: -0.006, +0.003, +0.012 +- 0.006, **+0.022 +- 0.006**, +0.019 +- 0.007 (visit 5, final); context share 0.16-0.18; entropy 0.073-0.088 at steps 42-51 |
+| rv512 D2 `...-lr4e-6-ris-nofrz-r3-1122b` | `wwsm00tr`, `qzugx9lt` | 4e-6, **nothing frozen**, R3 | 23, entropy guard | D2 - C: +0.001 +- 0.005, +0.001 +- 0.006, -0.025 +- 0.011 (partial); context share 0.165 -> 0.231 -> 0.317; entropy 0.055 -> 0.115; fewer, much longer replies |
+| rv512 E `...-lr4e-6-ris-frz-r3-seqm-1122` | 5 ids, first `sakpeofz`, last `uht6nw1t` | 4e-6, **sequence_mean**, R3, frozen | 35, **killed 11-23** | vs base by visit: -0.001, +0.005, +0.024 +- 0.007, +0.035 +- 0.008 (visit 4, partial, 394 tasks); E - C +0.013 +- 0.006 at visit 3; context +0.022 +- 0.006; 7 fewer turns, +341 reply tokens per turn; entropy flat 0.061-0.065 |
 
 Horizon's own final table (every run and eval with its W&B ids, checkpoint locations and code changes) is appendix
-B. JUPITER's final table was requested at the kill; see section 11 and appendix C.
+B. JUPITER's is appendix C (31 run directories, checkpoints, code and script changes, per-visit tables).
 
 ## 6. TB2.1 evals of Nemotron checkpoints (89 tasks x 3, T 1.0, no summarization, 16,384 tokens per reply)
 
@@ -294,8 +296,8 @@ step 115. Slower serving costs about 0.03 on this eval (agent timeouts).
   prompt_mean twin 10, 11, 20, 21, 30, 31, 40, 41, 45; new1829 continuation 70, 80, 90, 98, 100, 105; the sub512
   sequence_mean run's 10-step and epoch-end checkpoints up to 61; earlier runs' 10 / 20 / 30 / 50 as logged. Each
   is about 0.4 TB with optimizer state.
-- **Checkpoints, Horizon / JUPITER**: on their shared filesystems (R3 run: every 5th step 5-110, 57, 112, 114;
-  twin: up to 58; rv512 arms C 51, E 35, D2 23, B 21, A 19). Public HF repo
+- **Checkpoints, Horizon / JUPITER**: on their shared filesystems (Horizon R3 run: every 5th step 5-110, 57, 114;
+  twin: up to 58; JUPITER rv512 arms C 51, E 35, D2 23, B 21, A 19; full lists in appendices B1 and C6). Public HF repo
   `CharlieFRuan/nemotron35-calibforge-ckpts` holds a few (Horizon H step 25, R3 step 75, early 2e-6 checkpoints);
   uploads there are paused (storage quota) and nothing is deleted without the owner.
 - **Trial data**: `$D/runs/<run>/trials/` (Harbor result files, SkyCap records). TB traces and task data are
@@ -315,7 +317,7 @@ step 115. Slower serving costs about 0.03 on this eval (agent timeouts).
   sandboxes; twin ends at checkpoint 58.
 - **JUPITER**: confirmed 06:31 CET 11-24. Arms C and E stopped by PID at checkpoints 51 and 35 (C's visit 5 is its
   last complete visit); all 8 running, queued and held jobs cancelled; 726 labelled Dune sandboxes deleted, 0 left;
-  proxy stopped; checkpoints, trial directories and logs kept. Its final per-run table is being compiled (appendix C).
+  proxy stopped; checkpoints, trial directories and logs kept. Its final table is appendix C.
 - Never done: a TB2.1 eval of any repeat-visit checkpoint (Lila checkpoint 61 has the largest training-task gain,
   +0.057, and +0.031 held-out); a run with exact train / inference consistency (the vLLM blog's approach); a larger
   batch at the same LR (NVIDIA's recipe uses 512 prompts per step); raising the 16,384 reply cap in eval.
@@ -890,8 +892,318 @@ Horizon arm beats base by more than ~2 SE.
 
 ---
 
-## Appendix C. JUPITER's final table
+## Appendix C. JUPITER's final table (written by the JUPITER session, 2026-11-24 06:35 CET, after the kill)
 
-JUPITER confirmed the kill at 06:31 CET 11-24 and is compiling its table (31 run directories since 11-16: W&B ids,
-recipes, steps, checkpoint paths, end reasons, per-visit readouts, code changes). Not received when this version was
-pushed; this section is replaced when it arrives. Until then, section 5c holds the JUPITER numbers as logged on Lila.
+Copied as received, in five parts, except that the time of the relayed kill order is corrected to the clock reading
+(21:14 PST). The full file on JUPITER is `$D/NEMOTRON35_JUPITER_RUNS_1124.md` (259 lines); the session scripts and
+backups it cites were copied to `$D/ops/jupiter_session_scripts_1124/` (222 files). It covers all 31 Nemotron run
+directories since 11-16 plus the code changes. No relay host, IPs, keys, task names or traces are included.
+
+Compiled 2026-11-24 (CET) from read-only sources. All runs are stopped; the last two (C, E) were stopped at 06:15 CET
+on 11-24 by the kill-all order (owner via Lila, 21:14 PST 11-23).
+
+### C0. Sources and conventions
+
+- `$D` = the `calibforge` directory of the project's data filesystem on JUPITER (the absolute path is in the JUPITER
+  file itself and in Lila's `PLAN.md`, 11-23 entry; left out of this public file).
+- **Log, 11-18 10:42 onward:** `$D/PLAN.md` and `$D/FINDINGS.md`.
+- **Log, 11-16 04:09 to 11-18 09:47:** `$D/PLAN.md` starts at 11-18 10:42. The earlier history (setup, eval A, scan,
+  the overfit arms, the start of the control run) comes from `$D/ops/calibforge_nemo_jup_1116/PLAN.md` and
+  `$D/ops/calibforge_nemo_jup_1116/FINDINGS.md`, cited below as "ops PLAN" and "ops FINDINGS".
+- **Recipe knobs:** read from the Hydra config dumps in `$D/logs/<run>.log`. Every dump in a log was parsed, and the
+  policy block is `trainer.policy.*`. When dumps differ (for example EPOCHS 3 then 6, or CKPT_INTERVAL 5 then 1), both
+  values are given. "key absent" means the config field did not exist in the code at that time.
+- **W&B ids:** every distinct id matching `wandb.ai/.../runs/<id>` in the run's log, in order of first appearance.
+  The project is `sky-posttraining-uc-berkeley/skycap-calibforge-fully-async`.
+- **Dates:** "rec" is the mtime span of the run's SkyCap trial records (`runs/<run>/skycap/*.json.zst`), from the
+  first to the last trial written. ".jobs" is the span from the first to the last timestamped line of
+  `$D/logs/<run>.jobs`. All times are CET.
+- **Trained steps:** the value in `ckpts/latest_ckpt_global_step.txt`. When PLAN records steps trained after the last
+  checkpoint, they are noted.
+- **Results:** quoted as written in PLAN / FINDINGS, with +- SE and n where given. Visit readouts for the rv512 arms
+  are paired over tasks against `calibforge_v2_rv512_1121.base_ref.json` unless stated otherwise.
+- "?" = not findable in the sources.
+- **Common recipe (all v2 / rv512 runs):** fully async (sync for the overfit runs), 4-node trainer TP4 EP16 plus TP2
+  engines (8 engines; 6 with the head-node block from 11-21), agent timeout 3600 s (1800 s for the 16x8 overfits), and
+  16k tokens per turn. The 11-16 overfit arms are the exception: they ran a 2-node trainer TP4 EP8 with 4 engines.
+
+### C1. Evals and scans
+
+| Run | PLAN label | Purpose | W&B id(s) | Dates (CET) | Slurm jobs | Evaluated policy / layout | Why it ended | Key result (as recorded) |
+|---|---|---|---|---|---|---|---|---|
+| nemo-jup-base-eval-1116a | "Base TB2.1 eval A", "eval A", "base 1116a" | base-model TB2.1 x3 eval (89 tasks x 3) | 58i3jr9j | rec 11-16 07:34 -> 10:51; .jobs 11-16 07:17 -> 10:52 | 2930441 (eval B 2930568 queued, cancelled 11-16 13:51, never ran) | base weights; 12 engines (2-node trainer layout); T 1.0, no summarization, 3600 s, 262k ctx | completed ("eval written" 10:52; rc=134 is the SIGTERM sent after the write) | avg **0.2659**, pass@3 **0.3708** (+-~0.03 single-eval noise); 14% out-of-context, 25 agent timeouts (ops FINDINGS 11-16 10:52) |
+| nemo-jup-scan320-1116 | "Scan", "overfit task scan" | pick 32 overfit tasks: 320 random train tasks (seed 1116) x 4 | g3fgrera | rec 11-16 13:54 -> 14:55; .jobs 13:26 -> 14:55 | 2930566 | base, train settings, eval-only | stopped early at 1,242 / 1,280 trials once the pick was made (14:55) | tasks by #solved/4 {0: 122, 1: 36, 2: 32, 3: 35, 4: 67}; 89 candidates; 32 picked (`data/overfit32_nemo-jup-scan320-1116.txt`), mean pass 0.523 |
+| nemo-jup-eval-ris-r2-s35-1120 | "J35 eval", "J-r2 ckpt-35 eval" | TB2.1 x3 of J-r2 ckpt 35 | cz83t5bl | rec 11-20 06:39 -> 08:22; .jobs 06:05 -> 08:23 | 3022520 | `runs/nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2/ckpt_keep/global_step_35`; 8-engine layout (eval_ckpt.sh) | completed 08:23 | FINAL **0.2472 / 0.3596** (+-0.03); equal to base8 on the same layout (J35 - base8 = 0.000 / 0.000). The first comparison to 1116a was confounded by layout. 106 attempts stalled by the 06:52 proxy outage were retried (FINDINGS 11-20 08:24) |
+| nemo-jup-eval-base-8eng-1120 | "base8" | base-model eval on the 8-engine eval layout (baseline for the ckpt evals) | od1k730z | rec 11-20 18:10 -> 20:13; .jobs 17:53 -> 20:14 | 3024355 | base weights; 8 engines | completed (Slurm FAILED 6:0 = normal teardown after "eval written") | FINAL **0.2472 / 0.3596** (+-0.03); excluding one task 0.2462 / 0.3523. The 8-engine layout reads about 0.02 below 1116a |
+| nemo-jup-eval-ris-r2-s25-1119 | "J25", "J-r2 ckpt-25 eval" | TB2.1 x3 of J-r2 ckpt 25 | cazwfmhf | rec 11-20 23:38 -> 11-21 01:12; .jobs 11-20 23:09 -> 11-21 01:13 | 3018873 | `.../nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2/ckpt_keep/global_step_25`; 8 engines | completed | FINAL **0.2921 / 0.4157** (+-0.03); vs base8 +0.045 avg / +0.056 pass@3, "about 1.5-2x noise" (not significant) |
+| nemo-jup-eval-dppo-r2-s25-1119 | "H25", "H-r2 ckpt-25 eval" | TB2.1 x3 of H-r2 ckpt 25 (decision eval for continuing DPPO + freeze) | n1smvvm6 | rec 11-21 01:41 -> 04:08; .jobs 01:23 -> 04:08 | 3015990 | `.../nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118-r2/ckpt_keep/global_step_25`; 8 engines | completed | FINAL **0.2584 / 0.3708** (+-0.03); vs base8 +0.011 / +0.011, within noise |
+
+Recipe knobs do not apply to the evals. Their config dumps carry the launcher's training defaults: 1116a and scan
+show LR 2e-6 / dppo / prompt_mean / train48 / 32x16; the four checkpoint evals and base8 show 4e-6, lr_zero
+[router, mamba], bias rate 0.0 and ckpt_interval 1000. No eval trained, and none has checkpoints.
+
+Not run (no run dir): `nemo-jup-eval-ris-r3-s25-1121`, job 3037627 (R3 ckpt-25 eval). It was held from 11-21 04:46 and
+cancelled in the 11-24 06:19 kill-all.
+
+### C2. Overfit runs
+
+| Run | PLAN label | Purpose | W&B id(s) | Dates (CET) | Slurm jobs | LR | loss type | reduction | R3 | Frozen (policy lr_zero_modules) | Tasks | batch x group | epochs | Trained steps | Why it ended | Key result |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-jup-of32-lr2e-6-1116 | "overfit arm 2e-6", "lr2e-6" | sync overfit, 32 scan-picked tasks, LR bracket | g4drmqdu, rfec0ms7, ifuknpgv | rec 11-16 21:55 -> 23:52; .jobs 11-16 21:32 -> 11-17 00:46 | 2942884 (4 nodes, DEBUG_HOLD; replaces 2937561, cancelled before start) | 2e-6 | dppo | prompt_mean | off | none (key absent; freeze_moe_router false); bias rate not set | overfit32_nemo-jup-scan320-1116 | 32 x 16 | 15 | 1 | Host OOM at step-2 policy_train (23:53:08; Ray memory monitor). The relaunch in the held job died in load_checkpoints with a CUDA OOM (host memory spilled into HBM). Conclusion: the 2-node trainer does not fit on GH200, so the run was superseded by the tr4 layout | step 1 (pre-update): reward 0.504, pass@16 0.969, lp_gap 0.0425 |
+| nemo-jup-of32-lr5e-6-1116 | "overfit arm 5e-6", "lr5e-6" | as above, LR 5e-6 | o8qas8pd, qzhsiaci, 098uc947 | rec 11-16 21:55 -> 11-17 00:21; .jobs 21:32 -> 00:49 | 2942887 (replaces 2937562) | 5e-6 | dppo | prompt_mean | off | none (key absent) | overfit32_nemo-jup-scan320-1116 | 32 x 16 | 15 | 1 | Same OOM at 00:22:05. The relaunch with OVERLAP_CPU_OPT=false also died in load_checkpoints (CUDA OOM). Superseded by tr4 | step 1: reward 0.525, pass@16 1.000, lp_gap 0.0441 |
+| nemo-jup-of32-lr5e-6-tr4-1117 | "tr4 run", "32-task run" | validate the 8-node full-run layout (4-node trainer EP16 + 8 engines) on the 32-task overfit; resume test | q0roz1sz, ofypjjdc | rec 11-17 01:04 -> 05:53; .jobs 00:52 -> 06:01 | 2942884 + 2942887 (one Ray cluster over both) | 5e-6 | dppo | prompt_mean | off | none (key absent) | overfit32_nemo-jup-scan320-1116 | 32 x 16 | 15 | 4 | Owner decision 11-17 05:53: switch to Horizon's 16 tasks. Stopped after step 4 (06:01) | rewards 0.537 / 0.512 / 0.523 / 0.502, "flat within SE ~0.02 after 3 updates at 5e-6"; layout validated (no OOM at step-2 train; resume passed) |
+| nemo-jup-of16x8-lr5e-6-1117 | "of16x8", "16x8 overfit" | cross-cluster overfit on Horizon's 16 tasks | 5ciahmo7 | rec 11-17 06:18 -> 09:16; .jobs 06:02 (single launch line) | 2942884 + 2942887 | 5e-6 | dppo | prompt_mean | off | none (key absent) | overfit16_horizon-1117 | 16 x 8 | 30 | 8 | Hold jobs 2942884 / 2942887 reached walltime (~09:30; noted 09:35) | 8 steps: 0.594 / 0.594 / 0.617 / 0.617 / 0.602 / 0.703 / 0.617 / 0.664; "Steps 1-5 mean 0.605, steps 6-8 mean 0.661 (+0.056, ~1.4 SE at SE ~0.04/step): weak upward drift, not an overfit" |
+| nemo-jup-of16x8-ris-nolb-trdefault-lr4e-6-1118 | "trdefault" | overfit on Lila's 16 tasks, rollout_is, balancer off, thinking_retention=null, train every turn | 9quoqx5a | rec 11-18 23:51 -> 11-19 00:08; .jobs 11-18 22:55 -> 11-19 00:51 | 2980646 (rollis link 2's allocation) | 4e-6 | rollout_is | prompt_mean | off | [] (none); bias rate 0.0 | overfit16_lila-1118 | 16 x 8 | 30 | 0 (no ckpt; stopped during step-1 policy_train) | Lila: stop after step 1. Findings: history thinking was not dropped (skycap.use_raw_content=true), and train_paths=all forwarded 18.7x the tokens. Relaunched as -k4 | step 1: generate 1081 s, reward 0.367; 2885 rows; 114.9M tokens forwarded (18.7x the final path) |
+| nemo-jup-of16x8-ris-nolb-trdefault-lr4e-6-1118-k4 | "k4" | as trdefault, with use_raw_content=false (stock thinking drop) and uniform 4 turns per trajectory (path_rules:uniform_k4) | riblvyjy, s19thxfo, 1jnxn9ig | rec 11-19 01:41 -> 19:19; .jobs 00:51 -> 08:52 | 2980646, 2995686; queued and never ran: 2998158 (cancelled), 2999255 -> re-queued as 2999553 (held from 11-19 20:20 for the evals, cancelled 11-24 06:19) | 4e-6 | rollout_is | prompt_mean | off | []; bias 0.0 | overfit16_lila-1118 | 16 x 8 | 30 | 24 (step 24 last reported at 11-19 18:50) | 2995686 reached its end (planned 19:22; the end itself is not logged). The next link 2999553 was put on hold for the eval slot and never released, then cancelled in the 11-24 kill-all | 5-step means 0.283 (6-10) and 0.322 (11-15) vs Lila's thinking-kept 0.428 / 0.424; 16-20 excl. outage step 17: 0.348 vs Lila 0.475; entropy 0.1016 at step 20 (Lila 0.074); step 17 = outage step |
+
+### C3. A/B-30 arms (from control ckpt 30) and the control full run
+
+All run on `calibforge_v2_train48` (2,788 tasks), 32 x 16, EPOCHS 2, CKPT_INTERVAL 5, R3 off, LR 2e-6. The A/B arms
+resume from `runs/nemo-jup-cf-v2-b32-lr2e-6-1117/ckpt_keep/global_step_30`.
+
+| Run | PLAN label | Purpose | W&B id(s) | Dates (CET) | Slurm jobs | loss type | reduction | Frozen modules (policy) / bias rate | Trained steps (latest ckpt) | Why it ended | Key result |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-jup-cf-v2-b32-lr2e-6-1117 | "full run", "control" | first full run, 1:1 with Horizon's lr2e-6 run (R3 off, LR 2e-6 per the owner 11-17) | 1h2s9nt6, lx4apacy, wuomk3ka | rec 11-17 10:56 -> 11-18 10:48; .jobs 11-17 10:10 -> 11-18 10:49 | 2955306, 2957901, 2964965; queued and never ran: 2976099 (replaced), 2977791 (cancelled 11-18 09:07) | dppo | prompt_mean | none (lr_zero key absent); bias rate not overridden (Megatron default 1e-3 per ops PLAN 11-18 08:25) | 35; trained through step 37 (step 38 killed in rollout) | Job 2964965 was cancelled 11-18 10:48:10 by root (maintenance reservation). No restart. The control reference is steps 30-37 | Steps 1-24 reward flat (1-5 mean 0.454, 20-24 0.469); entropy 0.053-0.064 through step 30, then 0.0684 (31) -> 0.0792 (37); step-25 ckpt uploaded to HF |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-nolb-1118 | "nolb", "nolb A/B" | balancer off (expert-bias update rate 0) | f1a76z1c, ja3gw9zw | rec 11-18 09:47 -> 13:55; .jobs 09:07 -> 16:13 | 2977953; 2977975 (link 2, held, cancelled 11-18 21:16) | dppo | prompt_mean | none; bias rate 0.0 | 35; trained 31-37 | Swapped out for frz at 13:55 under Lila's rule (mean entropy over steps 35-37 = 0.0766 >= 0.072). The fallback restart from 35 at 14:35 crashed at load (RESUME_MODE bug in swap_in_alloc.sh). Lila: nolb concluded | "nolb 31-37 mean entropy 0.0706 vs control 0.0714: no difference within noise. Verdict: turning off the expert-bias balancer does NOT stop the entropy rise"; paired vs control -0.0007 (31-37) |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-frz-1118 | "frz" | router weights and bias frozen | 44y1u68u, d7hxmltp | rec 11-18 15:00 -> 21:07; .jobs 13:55 -> 14:48 | 2977953 (in nolb's allocation); 2983522 (follow-on, cancelled 14:34) | dppo | prompt_mean | attempt 1 (13:58): freeze_moe_router=true, which failed at the optimizer load (bucket shape mismatch). Attempt 2 (14:48): router_lr_zero=true (router weights LR 0) + bias rate 0.0 | 40; trained 31-42 | Allocation 2977953 reached walltime (TIMEOUT 21:07:07). No follow-on link: the STOP_CHAIN removal was blocked | "router freeze alone does not slow the entropy climb (rollis-frz 31-42 mean +0.0012; frz-control 31-37 mean -0.0001)"; bitwise freeze check at 35 passed |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-rollis-1118 | "rollis" | bounded-ratio loss (rollout_is, band (0.5, 5)), balancer on | n7aucc8o, z8jf8vyy | rec 11-18 12:36 -> 22:41; .jobs 09:09 -> 11-19 00:26 | 2977976 (cancelled by root 11:23 before any step), 2978021 (Ray failed to start, cancelled), 2980622, 2980646 (took over at 50; then reused for trdefault) | rollout_is | prompt_mean | none; bias rate default | 50; trained 31-50 | Lila: stop at step 50 (verdict reached). Link 2980646 reused for the overfit arm | Verdict 48-50: entropy 0.1194 / 0.1345 / 0.1292 (mean 0.1277) vs Horizon original 0.099@50; reward mean 0.457; "rollout_is does not slow the entropy rise" |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-mzf-1118 | "mzf" | router + all Mamba mixer params frozen (LR 0), bias rate 0 | vhxxkzae, 8i9z9b0t, bl8f6fuj | rec 11-18 18:01 -> 11-19 06:23; .jobs 11-18 17:08 -> 11-19 07:53 | 2987658, 2987772 | dppo | prompt_mean | lr_zero_modules [router, mamba]; bias 0.0. The first start, 17:16, missed conv1d; restarted 18:09 before step 31 with the fixed patterns | 50; trained 31-50 | Stopped 11-19 06:23 before step 51 and swapped for run H (Lila's decision) | "mzf entropy 48-50 0.0738 0.0679 0.0712 (mean 0.0710), reward mean 0.512" vs rollis 0.1277 / 0.457; "freezing Mamba mixers + router (with the balancer bias) stops the entropy climb at no reward cost through 20 steps; freezing the router alone, turning the balancer off, or rollout_is do not"; bitwise check at 35 passed (414 / 414 frozen tensors) |
+
+### C4. v2 full runs from base (J / H, J-r2 / H-r2, S, R3, R3+SC, unfrozen-mixer arm)
+
+All on `calibforge_v2_train48`, 32 x 16, EPOCHS 2, LR 4e-6, bias rate 0.0.
+
+| Run | PLAN label | Purpose | W&B id(s) | Dates (CET) | Slurm jobs | loss type | reduction | R3 | Frozen (policy lr_zero_modules) | ckpt interval | Trained steps (latest ckpt) | Why it ended | Key result |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118 | "J", "Full run J" | full run from base with the mzf freeze + rollout_is | lvxc7hn1 | rec 11-19 06:09 -> 08:19; .jobs 04:44 -> 09:49 | 2997191; 2997446 (cancelled) | rollout_is | prompt_mean | off | [router, mamba] | 5 | 5 | Stopped 08:19-08:21: contaminated by the Dune apt outage (07:20-08:00). Lila: restart from base as -r2 | steps 1-5 reward 0.508 / 0.389 / 0.279 / 0.152 / 0.008 (outage; ~90% 'error' endings); step-5 bitwise vs base PASSED |
+| nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118 | "H", "Run H (DPPO version of J)" | DPPO twin of J (replaced mzf) | td0ohoul | rec 11-19 06:42 -> 08:18; .jobs 06:23 -> 08:21 | 2987772 (mzf's allocation); 2997901 (follow-on, cancelled) | dppo | prompt_mean | off | [router, mamba] | 5 | 0 checkpoints (steps 1-3 trained per PLAN) | Same apt outage; restarted as -r2 | H 1-3 reward 0.512 / 0.266 / 0.090 (outage) |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2 | "J-r2" | J restarted from base with the apt mirror fix + tmux guard | 1nvvf22s, lce9kfit, uufisuec | rec 11-19 08:38 -> 11-20 21:38; .jobs 11-19 08:26 -> 11-20 23:08 | 2997191, 2999551, 3014196; re-queued: 2999195 -> 2999551, 3013043 -> 3014196; 3032407 (held 11-20 21:38, cancelled 11-24 06:19) | rollout_is | prompt_mean | off | [router, mamba] | 5, then 1 (links from 3014196) | 40 | Entropy stop-and-ask rule fired at step 40 (0.630 > 0.6); stopped at complete ckpt 40 on 11-20 21:38. Lila 21:45: "J-r2 is finished as an arm". (It was also swapped out 11-20 04:08 at ckpt 35 for R3 and resumed 18:04 in 3014196) | J25 eval 0.2921 / 0.4157 (+0.045 / +0.056 vs base8, ~1.5-2x noise); J35 eval 0.2472 / 0.3596 (= base8). Clean 5-step windows 0.529 (1-5) ... 0.624 (31-35), 0.582 (36-40). Entropy 0.054-0.061 (1-10), 0.103 (21-25 mean), 0.169 (26-30), 0.280-0.367 (31-35), 0.475-0.630 (36-40). Paired vs dppo-r2, steps 16-30: +0.004 +- 0.009, +0.002 +- 0.012, +0.005 +- 0.011 (FINDINGS 11-21 06:19) |
+| nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118-r2 | "H-r2" | H restarted from base (DPPO + freeze) | lq60kl2k, p0tanb8t | rec 11-19 08:39 -> 11-20 01:14; .jobs 11-19 08:27 -> 11-20 01:14 | 2987772, 2999552; re-queued: 2999196 -> 2999552, 3004388 -> 3014197 (cancelled 11-20 00:24 for the S arm) | dppo | prompt_mean | off | [router, mamba] | 5 | 35 | Link 2999552 reached walltime 11-20 01:14. Its next link was given to the sequence_mean arm, and H-r2 "gets no further link unless its step-25 eval >= 0.30"; H25 came in at 0.2584 | H25 eval 0.2584 / 0.3708 (+-0.03), +0.011 / +0.011 vs base8, within noise. Entropy flat 0.052-0.060; clean windows 0.538 / 0.487 / 0.523 / 0.521 / 0.563 / 0.502 / 0.555 (1-5 ... 31-35) |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-seqmean-1119 | "S arm", "sequence_mean arm" | J-r2 recipe with loss_reduction=sequence_mean (replicate of Lila's arm) | none (no log) | never ran; submitted 11-20 00:24, cancelled 14:35 | 3019525 (nemo-full-S; held by the cap enforcer the whole time) | rollout_is (per PLAN) | sequence_mean (per PLAN) | off | [router, mamba] (per PLAN) | 1 (per PLAN) | none (run dir holds only keeper / reaper markers) | Superseded: Lila's sequence_mean-only run "took off at step ~42", so S was replaced by R3+SC (11-20 14:35) | none |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3-1119 | "R3 arm", later "frozen R3" | J-r2 recipe + routing replay (R3), from base | fo7reydo, pv4ye15o, ai4sqcle, y262518b, nvrb3w2h, jruqdhu8, bo4vp16j | rec 11-20 04:37 -> 11-21 04:48; .jobs 11-20 04:08 -> 11-21 04:51 | 2999551 (04:11, no step before walltime 04:58), 3022474 (restarted in place 11:56 for the route-pad patch), 3014196 (from 23:27; OOM at steps 25 and 26; head-block rehearsal); 3027303 never ran (cancelled 11-21 10:22 by swap_queue) | rollout_is | prompt_mean | **on** | [router, mamba] | 1 | 26 | Lila 11-21 10:18: the pending R3 slot goes to the unfrozen-mixer arm. "Frozen R3 chain ended at ckpt 26" (3027303 cancelled). Its ckpt-25 eval (3037627) never ran | step 1 gap 0.0110 (J-r2 0.0447), clip 0.145% (J-r2 1.50%); clean windows 0.538 (1-5), 0.536 (6-10), 0.539 (11-15), 0.5506 (16-20), 0.5632 (21-25); entropy 0.056-0.066; gap 0.011-0.013. Paired J-r2 - R3, steps 16-25: +0.003 +- 0.011, -0.007 +- 0.020 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3sc-1120 | "R3+SC" (job name nemo-full-C, which is not rv512 arm C) | R3 + score centering + sample-support replay, top_k 20 | 53bp1o04, dj9slujz, dgysxwfy, 1gncsxky | rec 11-20 22:06 -> 11-21 10:42; .jobs 11-20 21:45 -> 11-21 12:12 | 3014196 (smoke, 11-20 21:45-23:08, step 1), 3029512; 3037620 (cancelled 11-21 10:42) | rollout_is | prompt_mean | on (+ enable_score_centering true, top_k 20) | [router, mamba] | 1 | 5 | Lila 11-21 10:26: swap the unfrozen-mixer arm into R3+SC's allocation; "R3+SC paused" at ckpt 5 (kept). Not resumed | Smoke step 1: reward 0.504, clean 0.562, entropy 0.0525, gap 0.0110, clip 0.148%, support TV 0.0053. Steps 2-4: reward 0.395 / 0.588 / 0.441, entropy 0.058 / 0.054 / 0.059 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-rfrz-r3-1121 | "unfrozen-mixer arm", "new arm", "NR" (job name nemo-full-M) | R3 with only the router frozen (Mamba mixers trained), from base | njfw5njk, x1ywhr7t | rec 11-21 11:06 -> 21:11; .jobs 10:25 -> 22:42 | 3029512, 3039870; queued and never ran: 3039816 (cancelled), 3044143 (cancelled 21:10) | rollout_is | prompt_mean | on | [router] | 1 | 15 | Retired 11-21 21:11 for the rv512 repeat-visit arms (Lila's call); its allocation went to arm A | Paired reward vs frozen R3: step 1 +0.014 +- 0.008 (178 groups, noise floor); steps 1-5 +0.020 +- 0.009 (278); 6-10 +0.014 +- 0.011 (n=129); 11-15 +0.012 +- 0.014 (n=111), none significant. Entropy 11-15 0.0748 vs 0.0597 (+25%), still rising |
+
+### C5. rv512 repeat-visit arms (512-task subset, visits = epochs)
+
+All on `calibforge_v2_rv512_1121` (512 tasks), 32 x 16, LR 4e-6 except A, rollout_is, R3 on, bias rate 0.0, seed 42,
+CKPT_INTERVAL 1, head block + 6 engines, TPS 1. EPOCHS=3 at launch. C, E and D2 were relaunched with EPOCHS=6 on 11-22
+at 23:50 (C restarted 11-23 00:07; E and D2 got EPOCHS=6 links). Plan as of 11-23 19:27 (Lila, under the owner's
+wind-down): C ends after visit 6, D2 at visit 3 or the guard, E up to 6 visits; superseded by the 11-24 kill-all.
+
+| Run | PLAN label | Purpose | W&B id(s) | Dates (CET) | Slurm jobs | LR | reduction | Frozen (policy lr_zero_modules) | Epochs planned | Trained steps (latest ckpt) | Why it ended | Key result (paired vs base ref unless noted) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121 | "Arm A" (the "lr1e-5 arm") | frozen R3 at LR 1e-5 | 2k1cr4e8, 95gylg9a, bp6lp84f | rec 11-21 21:36 -> 11-22 13:55; .jobs 11-21 20:36 -> 11-22 15:26 | 3039870, 3047278; 3051248 (cancelled) | 1e-5 | prompt_mean | [router, mamba] | 3 | 19 | Lila 11-22 13:52: stop A (-0.033 +- 0.008 vs base after two passes and growing). Ckpt 19 kept; D took its slot. A false crash-restart by the spill guard (11-22 00:34) cost ~1 h | v1 - base -0.011 +- 0.006 (n=484); v2 - base -0.033 +- 0.008 (n=511); v2 - v1 -0.016 +- 0.007 (483); A - C v1 -0.006 +- 0.006 (n=482); v2 cap share 0.426, ctx 0.324 |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-1121 | "C" (arm C) | frozen R3 at 4e-6, prompt_mean (reference arm) | 1heg2a7d, v6eycqlv, 3yrec2by, r3eo21np, hnt7pbt7, j0vajcij | rec 11-22 04:35 -> 11-24 06:15; .jobs 11-22 04:10 -> 11-24 06:17 | 3047276, 3051163, 3066415, 3073196; queued and never ran: 3057382 (cancelled, EPOCHS=3), 3088723 (cancelled 11-24) | 4e-6 | prompt_mean | [router, mamba] | 3, then 6 | 51 | Kill-all 11-24 06:15 (owner via Lila): stopped by PID at global_step_51 (state file present). Also paused by the Dune setup-failure rule 11-23 12:55-14:08 | v1 -0.006 +- 0.006 (510); v2 +0.003 +- 0.006 (489); v3 +0.012 +- 0.006 (509); v4 +0.022 +- 0.006 (484; contains Dune-affected steps 36-37); v4 - v1 +0.027 +- 0.006 (482). v5 +0.019 +- 0.007 (501), final (visit 5 closed when visit 6 opened 11-24 06:11; no step trained in visit 6) |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-rfrz-r3-1121 | "B" (arm B) | router frozen, Mamba mixers trained (B - C isolates the mixers) | xjyq09u0, wak64a1y | rec 11-22 04:50 -> 18:42; .jobs 04:10 -> 20:12 | 3047277, 3051164; 3057383 (held, then cancelled) | 4e-6 | prompt_mean | [router] | 3 | 21 | Lila 11-22 18:08: stop B when visit 2 closes and start E in its allocation; done at 18:42, ckpt 21 kept | v1 -0.004 +- 0.006 (510); B - C v1 +0.003 +- 0.006 (509); v2 +0.008 +- 0.006 (499); B - C v2 +0.005 +- 0.006 (479) |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122 | "D" (attempt 1) | router and mixers trained (D - B isolates the router) | tkf4zqgq, bpat1o9n | rec 11-22 14:17 -> 15:30; .jobs 13:55 -> 16:15 | 3047278 (A's allocation), 3056082 (FAILED 16:15); 3057479 (cancelled) | 4e-6 | prompt_mean | [] (none) | 3 | 1 (no fully_async_state.pt) | Chain handoff race: the handoff cancelled 3047278 after latest_ckpt was written but before fully_async_state.pt existed, so 3056082 could not resume. Restarted from base as ...-1122b (attempt 1 records not used) | step 1: entropy 0.0547, gap 0.0115, grad norm 0.080; HBM spill 0-1 MB ("no memory obstacle to training the router on GH200") |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122b | "D2" | D restarted from base under a fresh name | wwsm00tr, qzugx9lt | rec 11-22 23:41 -> 11-23 22:04; .jobs 11-22 23:11 -> 11-23 23:35 | 3058646, 3066494; queued and never ran: 3065859 (cancelled, EPOCHS=3), 3079375 (cancelled 11-24) | 4e-6 | prompt_mean | [] (none) | 3, then 6 (D2 limited to visit 3) | 23 | Entropy guard: 5-step mean 0.1017 > 0.10 (steps 19-23). Stopped at global_step_23 on 11-23 22:06; ckpt 23 kept; E swapped into 3066494 | v1 -0.006 +- 0.006 (508), D2 - C +0.001 +- 0.005 (508); v2 +0.007 +- 0.006 (506), D2 - C +0.001 +- 0.006 (486), ctx 0.231 vs C 0.174; v3 PARTIAL (263 groups): v3 - base -0.013 +- 0.011, D2 - C v3 -0.025 +- 0.011 (n=262); entropy 0.058 -> 0.115 over 23 steps |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-seqm-1122 | "E" (arm E) | C with loss_reduction=sequence_mean (Lila's reference reduction) | sakpeofz, kv6u6w0r, bjajwtt6, nh82dbip, uht6nw1t | rec 11-22 19:04 -> 11-24 06:15; .jobs 11-22 18:42 -> 11-24 06:17 | 3051164 (B's allocation), 3066493, 3066494 (D2's allocation, 11-23 22:08 -> 11-24 01:53), 3069118; queued and never ran: 3061187 (cancelled, EPOCHS=3), 3086502 (cancelled 11-24) | 4e-6 | **sequence_mean** | [router, mamba] | 3, then 6 | 35 | Kill-all 11-24 06:15: stopped by PID at global_step_35 (state file present). Also paused by the Dune rule 11-23 12:55-13:30 | v1 -0.001 +- 0.006 (512), E - C +0.005 +- 0.005 (510); v2 +0.005 +- 0.006 (497), E - C -0.001 +- 0.006 (475); v3 +0.024 +- 0.007 (488), E - C v3 +0.013 +- 0.006 (n=487); v4 PARTIAL (394 groups at the stop): +0.035 +- 0.008, E - C v4 +0.015 +- 0.008 (371) |
+
+Note on labels: on JUPITER the router-only-frozen rv512 arm is B. D is the first no-freeze attempt, 1 step, unusable.
+D2 is its restart.
+
+### C6. Checkpoints on disk (JUPITER; every path is `$D/runs/<run>/...`)
+
+"Latest" is `ckpts/global_step_<latest_ckpt_global_step.txt>`. "Kept" lists every `ckpt_keep/global_step_N` (hard
+links that survive rotation). Sync-launcher runs (of32, of16x8, trdefault / k4) write no `fully_async_state.pt`; that
+is expected. The R3 ckpt_keep extras (steps 1-4, 6-9, 11-13) were deleted on 11-20 at Lila's instruction. A's ckpt 10
+was rotated out (MAX_CKPTS=6).
+
+| Run | Latest | Latest ckpt (under `$D/runs/<run>/`) | Kept (ckpt_keep) |
+|---|---|---|---|
+| nemo-jup-base-eval-1116a, nemo-jup-scan320-1116, nemo-jup-eval-ris-r2-s35-1120, nemo-jup-eval-base-8eng-1120, nemo-jup-eval-ris-r2-s25-1119, nemo-jup-eval-dppo-r2-s25-1119 | evals, none | none | none |
+| nemo-jup-of32-lr2e-6-1116 | 1 | ckpts/global_step_1 (sync) | none |
+| nemo-jup-of32-lr5e-6-1116 | 1 | ckpts/global_step_1 (sync) | none |
+| nemo-jup-of32-lr5e-6-tr4-1117 | 4 | ckpts/global_step_4 (sync) | none |
+| nemo-jup-of16x8-lr5e-6-1117 | 8 | ckpts/global_step_8 (sync) | none |
+| nemo-jup-of16x8-ris-nolb-trdefault-lr4e-6-1118 | none | none | none |
+| nemo-jup-of16x8-ris-nolb-trdefault-lr4e-6-1118-k4 | 24 | ckpts/global_step_24 (sync) | none |
+| nemo-jup-cf-v2-b32-lr2e-6-1117 (control) | 35 | ckpts/global_step_35 (state present) | 25, 30, 35 |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-nolb-1118 | 35 | ckpts/global_step_35 (state present) | 35 |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-frz-1118 | 40 | ckpts/global_step_40 (state present) | 35, 40 |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-rollis-1118 | 50 | ckpts/global_step_50 (state present) | 50 |
+| nemo-jup-cf-v2-b32-lr2e-6-ab30-mzf-1118 | 50 | ckpts/global_step_50 (state present) | 35, 40, 45, 50 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118 (J) | 5 | ckpts/global_step_5 (state present) | 5 |
+| nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118 (H) | none | none | none |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-1118-r2 (J-r2) | 40 | ckpts/global_step_40 (state present) | 5, 10, 15, 20, 25, 30, 35, 40 |
+| nemo-jup-cf-v2-b32-lr4e-6-dppo-frz-1118-r2 (H-r2) | 35 | ckpts/global_step_35 (state present) | 5, 10, 15, 20, 25, 30, 35 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-seqmean-1119 (S) | never ran | none | none (empty ckpt_keep dir) |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3-1119 (R3) | 26 | ckpts/global_step_26 (state present) | 5, 10, 15, 20, 25 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-frz-r3sc-1120 (R3+SC) | 5 | ckpts/global_step_5 (state present) | 5 |
+| nemo-jup-cf-v2-b32-lr4e-6-ris-rfrz-r3-1121 (unfrozen-mixer) | 15 | ckpts/global_step_15 (state present) | 5, 10, 15 |
+| nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121 (A) | 19 | ckpts/global_step_19 (state present) | 19 |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-1121 (C) | 51 | ckpts/global_step_51 (state present) | 31, 51 |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-rfrz-r3-1121 (B) | 21 | ckpts/global_step_21 (state present) | 21 |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122 (D attempt 1) | 1 | ckpts/global_step_1 (NO fully_async_state.pt; not resumable) | none |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122b (D2) | 23 | ckpts/global_step_23 (state present) | 23 |
+| nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-seqm-1122 (E) | 35 | ckpts/global_step_35 (state present) | 35 |
+
+Each `ckpts/` directory also holds up to MAX_CKPTS=6 older steps, for example C global_step_46-51 and R3 21-26. HF
+repo (`CharlieFRuan/nemotron35-calibforge-ckpts`): control global_step_25 was uploaded and verified on 11-18 02:37.
+R3 steps 1-4 were uploaded by a watcher bug and deleted on 11-21 00:08. HF watchers have been paused since 11-20
+18:35 (storage quota).
+
+Trained past the last ckpt (from PLAN): control trained through step 37 (ckpt 35); nolb 37 (ckpt 35); frz 42 (ckpt
+40). H trained steps 1-3 with no ckpt.
+
+### C7. JUPITER-side code and script changes (chronological)
+
+Repo state, checked read-only on 11-24:
+
+- calibforge-SkyRL is on branch `jupiter-nemotron` at HEAD 561e763b (the brief commit). All local code changes are
+  uncommitted in the working tree and none are pushed. `git diff --stat`: 15 files, +468 / -45. Untracked:
+  `examples/train_integrations/harbor_skycap/path_rules.py`, `handoff/ops/calibforge_rl_1110/test_env_retry.py`.
+- Ops scripts live in `$D/ops/calibforge_nemo_jup_1116/` (not a git repo).
+- Watcher / controller scripts were in the session scratchpad. On 11-24 they were all copied with their backups to
+  `$D/ops/jupiter_session_scripts_1124/` (222 files); "scratchpad/" below means that copy.
+- Relay scripts live in the rl-env-cleaner checkout under `skycap_overfit/jupiter/` (git: `relay/connect_proxy.py`
+  and `relay/login_services.sh` modified, +11 / -6; `ray_cluster.sh`, `build_nemo_env.sh`, `gsm8k_nemotron.sbatch`
+  and `relay/proxy_watchdog.sh` untracked).
+
+"Diff" = a saved diff file. "Backup" = a pre-change copy. "git" = recoverable only through `git diff` against HEAD.
+
+| Date (CET) | File(s) | Change | Backup / diff |
+|---|---|---|---|
+| 11-16 04:09 | calibforge-SkyRL `pyproject.toml`, `uv.lock` | pip nvcc / crt / nvvm pinned to 13.0.88 (TileLang / fla JIT on sm_90) | git only |
+| 11-16 04:09 | calibforge-SkyRL `skyrl/backends/skyrl_train/workers/worker.py` | numa_set_preferred instead of numa_set_membind (strict bind OOM-killed ckpt loads on GH200) | git only |
+| 11-16 04:09 / 07:59 | calibforge-SkyRL `examples/.../harbor_skycap/run_fully_async_terminus.sh`, `run_sync_terminus.sh` | Horizon's MODEL_FAMILY=nemotron-3.5 launcher port + MEGATRON_EP / MEGATRON_CP / POLICY_GPUS_PER_NODE knobs; later OVERLAP_CPU_OPT (11-17 00:35) | git only |
+| 11-16 04:09 | rl-env-cleaner `relay/connect_proxy.py`, `relay/login_services.sh` | login-node CONNECT proxy: provider allowlist, 8192 fds | git only (tracked, modified) |
+| 11-16 05:21 | rl-env-cleaner `ray_cluster.sh` (untracked) | SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S=1800 | none |
+| 11-17 00:12 | `ray_cluster.sh` | RAY_memory_usage_threshold=0.98 | none |
+| 11-17 00:12 / 00:52 | `ops/.../relaunch_in_hold.sh`, `relaunch_two_jobs.sh` (new); `ray_cluster.sh` MIMO_EXTRA_NO_PROXY | relaunch in held DEBUG_HOLD jobs; one Ray cluster over two jobs | new files; none |
+| 11-17 07:15-07:27 | `ops/.../calibforge_chain.sbatch` (new); `relay/proxy_watchdog.sh` (new, untracked) | 12 h chain links, link-start sandbox cleanup, driver watchdog; proxy wait / stop; proxy watchdog | new files |
+| 11-17 07:29 / 11:40 | `ops/.../hf_ckpt_upload.py`, `hf_ckpt_watch.sh` (new) | HF upload of every 25th + epoch-end ckpt; 11:40 fix: stage hard links and verify the repo tree | new files |
+| 11-17 18:34 | `ops/.../dune_reaper.sh` (new) | delete a run's sandboxes after each link ends | new file |
+| 11-18 ~08:3x | `ops/.../run_rl_jupiter.sh` | RESUME_PATH -> resume_mode from_path, ignored once the run has its own ckpt (chain-safe) | none found |
+| 11-18 ~08:35 | `ops/.../calibforge_chain.sbatch`, `calibforge_nemo.sbatch` | Slurm account change | none |
+| 11-18 08:55-09:07 | `ops/.../calibforge_chain.sbatch` | overlap handoff (--begin = end - LEAD_MIN, PREV_JOB, wait for next ckpt then scancel); AB_FILE; cross-run handoff (PREV_RUN, HANDOFF_STEP) | none (tested offline) |
+| 11-18 12:27 | `ops/.../swap_in_alloc.sh` (new) | swap a run in a live allocation (SIGSTOP launcher, kill driver by PID, srun --overlap) | new file |
+| 11-18 14:48 | `ops/.../swap_in_alloc.sh` | also unset RESUME_MODE (nolb restart crash fix) | none |
+| 11-18 14:48 | calibforge-SkyRL `skyrl/train/config/config.py`, `.../distributed/megatron/optimizer.py`, `.../workers/megatron/megatron_worker.py` | router_lr_zero: zero-LR param group for the router + optimizer load patch | diff `ops/calibforge_nemo_jup_1116/router_lr_zero_1118.diff` |
+| 11-18 17:08 / 17:55 | same three files | generalized to lr_zero_modules [router, mamba]; 17:55 conv1d_weight / conv1d_bias pattern fix | diff `ops/calibforge_nemo_jup_1116/lr_zero_modules_1118.diff` |
+| 11-18 17:08 | `ops/.../calibforge_chain.sbatch` | pass script args to the next link | none |
+| 11-18 18:09 | `ops/.../swap_in_alloc.sh` | batch pgrep matches batch scripts with args | none |
+| 11-18 22:54 | `ops/.../swap_in_alloc.sh` | SWAP_ENV + NEW_RESUME=none | backup `swap_in_alloc.sh.bak1118` |
+| 11-19 00:43 | calibforge-SkyRL `examples/.../harbor_skycap/path_rules.py` (new, untracked) | uniform_k4 train-path rule | new file |
+| 11-19 08:33 | calibforge-SkyRL `examples/.../harbor_skycap/terminus_installed.py` | SKYCAP_APT_MIRRORS rewrite + tmux guard (TmuxMissingError); test knob SKYCAP_APT_MIRROR_BROKEN_PROB | diff `ops/.../apt_mirror_tmux_guard_1119.diff`; backup `scratchpad/terminus_installed.py.bak1119` |
+| 11-19 13:56-13:58 | calibforge-SkyRL `examples/.../harbor_generator.py`, `outage_guard.py`; new `handoff/ops/calibforge_rl_1110/test_env_retry.py` | bounded env retry (SKYCAP_ENV_RETRIES=3) for TmuxMissing / AgentSetupTimeout / EnvironmentStartTimeout, + RelayStubNotStarted | diff `ops/.../env_retry_1119.diff`; backups `scratchpad/harbor_generator.py.bak1119`, `scratchpad/outage_guard.py.bak1119`, combined `scratchpad/outage_guard_local.diff` |
+| 11-19 13:56 / 18:50 / 20:20 | `ops/.../step_table.py`, `ops/.../outage_steps.txt`, `scratchpad/alarm_jh.py` | outage-step exclusion; stop-and-ask rules | backups `scratchpad/step_table.py.bak1119b`, `scratchpad/alarm_jh.py.bak1119b` |
+| 11-19 18:05 | `ops/.../requeue_link.py` (new) | re-queue links with CKPT_INTERVAL=1 | new file |
+| 11-19 20:20 | `ops/.../eval_ckpt.sh` (new); `ops/.../calibforge_nemo.sbatch` | ckpt eval (EVAL_ONLY + RESUME_PATH); EVAL_STEP + label-only sandbox cleanup | backup `scratchpad/calibforge_nemo.sbatch.bak1119` |
+| 11-19 20:20 to 11-20 00:24 | `ops/.../reply_len.py`, `think_split.py`, `reply_len_sup.py`, `adv_len.py`, `masked_groups.py` (new) | analysis only | new files |
+| 11-20 03:59 | calibforge-SkyRL `skyrl/backends/skyrl_train/workers/worker_utils.py` | signed-diff-mean and exp-abs-diff>2 mismatch metrics (report only) | diff `ops/.../mismatch_metrics_1120.diff`; backup `scratchpad/worker_utils.py.bak1120` |
+| 11-20 04:15 | `ops/.../step_table.py` | J-r2 continuation rules, WCTX | backup `scratchpad/step_table.py.bak1120` |
+| 11-20 05:46 | `ops/.../dune_reaper.sh` | cutoff = sacct End + 5 min | backup `scratchpad/dune_reaper.sh.bak1120` |
+| 11-20 07:50 | `ops/.../eval_prelim.py`; `ops/.../eval_time_split.py` (new) | count stalled attempts as superseded | backup `scratchpad/eval_prelim.py.bak1120` |
+| 11-20 07:50 | calibforge-SkyRL `examples/.../sandbox_relay/exec_transport.py`, `tests/integrations/harbor_skycap/test_sandbox_relay_exec.py` | retry a relay reply until SKYCAP_RELAY_REPLY_RETRY_SEC (600 s) + new test | diff `ops/.../relay_reply_retry_1120.diff`; backup `scratchpad/exec_transport.py.bak1120` |
+| 11-20 11:51 | calibforge-SkyRL `skyrl/train/generators/utils.py` | _pad_missing_routes (R3 "received a mix" fix) | diff `ops/calibforge_nemo_jup_1116/r3_route_pad_1120.diff`; backup `scratchpad/gen_utils.py.bak1120` |
+| 11-20 18:32 | `ops/.../hf_ckpt_watch.sh` | keep / upload rule n % 25 == 0 only (bug: uploaded R3 steps 1-4) | backups `scratchpad/hf_ckpt_watch.sh.bak1120`, `.bak1121` |
+| 11-20 14:35 to 21:45 | scratchpad `cap_enforce*.sh`, `r3_into_j*.sh`, `r3sc_smoke*.sh`, `resubmit_eval.py`, `submit_r3sc_link.py` | slot cap / swap / smoke controllers | backups `scratchpad/r3_into_j.sh.bak2142`, `scratchpad/r3sc_first_step.sh.bak2145` |
+| 11-21 02:49 | `ops/.../head_gpu_block.py`, `ops/.../restart_in_alloc.sh` (new); `swap_in_alloc.sh` EXPECT_GPUS; `scratchpad/spill_guard.sh` | head-node GPU block, in-allocation restart, spill guard | backup `scratchpad/swap_in_alloc.sh.bak1121` |
+| 11-21 04:47 | `ops/.../keep_ckpts_policy2.sh` (new) | keep every 5th, link only once fully_async_state.pt exists | new file |
+| 11-21 05:04 | `ops/.../run_rl_jupiter.sh` | HEAD_BLOCK hook (block head GPUs, NUM_ENGINES=6) | backup `scratchpad/run_rl_jupiter.sh.bak1121` |
+| 11-21 05:42 | `ops/.../run_rl_jupiter.sh`; `ops/.../dune_dns_probe.py` (new); `scratchpad/pace_ctl*.sh` | HOLD_STARTS and LAUNCH_ENV hooks (TPS=1); DNS / apt probe; pacing gates | backup `scratchpad/run_rl_jupiter.sh.bak1121b` |
+| 11-22 04:13 | `scratchpad/spill_guard2.sh` | crash needs 3 explicit "no driver" answers + log silent > 5 min (false crash-restart fix) | backup `scratchpad/spill_guard2.sh.bak_1122` |
+| 11-22 05:37 / 10:52 | `scratchpad/visit_table.py` | split re-dispatches; cache v2 (turns, tokens per turn, cap share) | backup `scratchpad/visit_table.py.bak_1122b` |
+| 11-22 16:23 | `ops/.../calibforge_chain.sbatch` | handoff also waits for a non-empty fully_async_state.pt (D handoff race) | backup `calibforge_chain.sbatch.bak_1122` |
+| 11-22 18:11 | `scratchpad/submit_rv.sh`, `scratchpad/auto_watch.sh` | XOV extra overrides | backups `.bak_1122e` |
+| 11-22 20:24 | scratchpad `handoff_check` | 3 squeue tries with 60 s gaps | none found |
+| 11-23 08:09 | `scratchpad/visit_table.py`; `scratchpad/matched_turns.py` (new) | cache v3 (end context, terminal tokens per turn); paired shifts | backup `scratchpad/visit_table.py.bak_1123` |
+| 11-23 09:37 | `scratchpad/handoff_check.sh` | match both link-start lines | backup `scratchpad/handoff_check.sh.bak_1123` |
+| 11-23 10:49 | `scratchpad/auto_watch.sh` | squeue retries + sacct before "gone" | backup `scratchpad/auto_watch.sh.bak_1123` |
+| 11-23 12:55-13:01 | scratchpad `dune_pause.sh`, `dune_gate.sh`, `sf_watch.sh` (new) | Dune setup-failure pause rule and gate | new files |
+| 11-23 17:33-17:48 | scratchpad `d2_guard.sh`, `ctx_window.py`, `arm_pause.sh`, `d2_end.sh`, `e_swap.sh`, `arm_guard.sh` (new); launcher-lookup fix in `dune_pause.sh` / `arm_pause.sh`; `dune_gate2.sh` (GATE_SKIP) | D2 / C / E guards; srun-step launcher lookup | backup `scratchpad/dune_pause.sh.bak_1123b` |
+| 11-23 18:22 | `scratchpad/sf_watch2.sh` (new) | amended pause rule + proxy check | new file |
+| 11-23 18:25 | `relay/proxy_watchdog.sh` (untracked) | restart only after 3 consecutive failed checks, 15 s connect timeout, per-check log with load average | backup `relay/proxy_watchdog.sh.bak_1123` |
+| 11-23 19:29 | `scratchpad/arm_final.sh` (new) | at an arm's final ckpt: stop watchers, STOP_CHAIN, keep ckpt, clean sandboxes | new file |
+| 11-23 21:37 | `scratchpad/arm_pause.sh`, `d2_end.sh`, `e_swap.sh`; `ops/.../swap_in_alloc.sh` | empty Slurm answer = unknown (sacct state); batch host / nodes from the job start line | backups `.bak_2130`, `.bak_2135`, `swap_in_alloc.sh.bak_2140` |
+| 11-23 21:39 | `scratchpad/slurm_st.sh` (new), sourced by e_swap, arm_guard, arm_final, sf_watch2, dune_gate2 | shared squeue -> sacct -> UNKNOWN state; arm_guard follows the chain up to 24 h | backups `.bak_2145` |
+
+Not changed: `loss_reduction: prompt_mean` is hard-coded at `run_fully_async_terminus.sh:183` and was overridden only
+for E (and the never-run S arm). The `ray_cluster.sh` gap noted 11-18 11:55 (a failed `ray start` is not detected) was
+never fixed.
+
+### C8. rv512 arms: final per-visit tables (numbers as of 06:38 CET 11-24)
+
+512-task `calibforge_v2_rv512_1121` set, batch 32 groups x 16, LR 4e-6 unless noted, rollout_is, R3 routing replay on.
+
+- Paired reward vs base = mean over tasks of (visit reward - base reference reward for that task) +- SE (n tasks).
+- ctx = context-exceeded share of trials.
+- Entropy, gap and grad norm ranges are over the steps trained while that visit was being dispatched. Gap =
+  `minibatch_rollout_logprobs_abs_diff_mean`.
+- Each full visit is about 10 trained steps, as measured from the step log (not derived).
+- PARTIAL = the visit had not closed when the run ended. Its complete groups lean toward shorter tasks.
+
+**C: prompt_mean, frozen router + mamba** (`nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-1121`)
+
+| visit | groups | reward | vs base | ctx | median turns | reply tok/turn (mean / median) | end ctx mean / median | steps | entropy | gap | grad norm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 510 | 0.390 | -0.006 +- 0.006 (510) | 0.167 | 23 | 1151 / 288 | 61.5k / 49.5k | 1-10 | 0.052-0.059 | 0.0116-0.0133 | 0.057-0.079 |
+| 2 | 489 | 0.402 | +0.003 +- 0.006 (489) | 0.174 | 23 | 1117 / 281 | 62.4k / 50.9k | 11-20 | 0.053-0.061 | 0.0114-0.0129 | 0.059-0.079 |
+| 3 | 509 | 0.408 | +0.012 +- 0.006 (509) | 0.170 | 23 | 1071 / 279 | 62.5k / 50.2k | 21-30 | 0.058-0.067 | 0.0117-0.0130 | 0.062-0.091 |
+| 4 | 484 | 0.421 | +0.022 +- 0.006 (484) | 0.164 | 23 | 1114 / 307 | 60.6k / 46.8k | 32-41 (step 31 has no metrics line paired with its save) | 0.062-0.075 | 0.0116-0.0135 | 0.059-0.091 |
+| 5 | 501 | 0.415 | +0.019 +- 0.007 (501) | 0.180 | 24 | 1127 / 330 | 62.6k / 50.9k | 42-51 | 0.073-0.088 | 0.0124-0.0147 | 0.058-0.095 |
+| 6 | 0 | - | (opened 11-24 06:11; stopped 06:15) | | | | | | | | |
+
+Visit 5 closed when visit 6 opened at 06:11 on 11-24, so it is final. Visit 4 includes Dune-outage steps 36-37. The
+11-23 17:57-18:00 proxy outage (228 setup failures) fell in visit 5.
+
+**E: sequence_mean, frozen router + mamba** (`nemo-jup-cf-rv512-b32-lr4e-6-ris-frz-r3-seqm-1122`)
+
+| visit | groups | reward | vs base | ctx | median turns | reply tok/turn | end ctx | steps | entropy | gap | grad norm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 512 | 0.393 | -0.001 +- 0.006 (512) | 0.164 | 21 | 1225 / 310 | 60.5k / 48.0k | 1-10 | 0.054-0.063 | 0.0118-0.0140 | 0.061-0.085 |
+| 2 | 497 | 0.405 | +0.005 +- 0.006 (497) | 0.174 | 20 | 1347 / 336 | 61.0k / 48.2k | 11-20 | 0.056-0.060 | 0.0118-0.0134 | 0.059-0.083 |
+| 3 | 488 | 0.422 | +0.024 +- 0.007 (488) | 0.190 | 21 | 1435 / 350 | 62.7k / 49.8k | 21-29 | 0.059-0.064 | 0.0124-0.0142 | 0.061-0.084 |
+| 4 PARTIAL | 394 | 0.432 | +0.035 +- 0.008 (394) PARTIAL | 0.204 | 22 | 1440 / 338 | 64.7k / 53.0k | 30-35 | 0.061-0.065 | 0.0126-0.0139 | 0.055-0.079 |
+
+**E - C, paired on common tasks (same task, same visit)**
+
+| visit | n | reward | ctx | turns | reply tok/turn | end ctx |
+|---|---|---|---|---|---|---|
+| 1 | 510 | +0.005 +- 0.005 | -0.003 +- 0.004 | -2.4 +- 0.5 | +72 +- 16 | -0.9k +- 0.4k |
+| 2 | 475 | -0.001 +- 0.006 | +0.004 +- 0.004 | -5.5 +- 0.5 | +232 +- 22 | -1.1k +- 0.4k |
+| 3 | 487 | +0.013 +- 0.006 | +0.022 +- 0.006 | -7.2 +- 0.6 | +341 +- 25 | +0.5k +- 0.4k |
+| 4 PARTIAL | 371 | +0.015 +- 0.008 | +0.025 +- 0.007 | -5.0 +- 0.6 | +375 +- 30 | +1.8k +- 0.6k |
+
+**D2: prompt_mean, nothing frozen (lr_zero [])** (`nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122b`)
+
+| visit | groups | reward | vs base | ctx | median turns | reply tok/turn | end ctx | steps | entropy | gap | grad norm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 508 | 0.392 | -0.006 +- 0.006 (508) | 0.165 | 21 | 1244 / 313 | 60.7k / 48.4k | 1-10 | 0.054-0.067 | 0.0121-0.0157 | 0.061-0.079 |
+| 2 | 506 | 0.404 | +0.007 +- 0.006 (506) | 0.231 | 21 | 1710 / 394 | 67.1k / 56.1k | 11-19 | 0.067-0.091 | 0.0132-0.0149 | 0.057-0.083 |
+| 3 PARTIAL | 263 | 0.385 | -0.013 +- 0.011 (263) PARTIAL | 0.317 | 20 | 2232 / 459 | 75.6k / 71.8k | 20-23 | 0.103-0.115 | 0.0142-0.0146 | 0.047-0.053 |
+
+D2 - C: v1 +0.001 +- 0.005 (508), v2 +0.001 +- 0.006 (486), v3 PARTIAL -0.025 +- 0.011 (262). Paired D2 v3 - C v3
+(257 tasks): ctx +0.120 +- 0.012, turns -12.6 +- 1.1, reply +1199 +- 59 tok/turn, end ctx +10.3k +- 0.8k.
+
+**B: router frozen, Mamba mixers trained** (`nemo-jup-cf-rv512-b32-lr4e-6-ris-rfrz-r3-1121`)
+
+| visit | groups | reward | vs base | ctx | median turns | reply tok/turn | end ctx | steps | entropy | gap | grad norm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 510 | 0.392 | -0.004 +- 0.006 (510) | 0.172 | 22 | 1223 / 297 | 62.6k / 50.7k | 1-10 | 0.053-0.067 | 0.0114-0.0144 | 0.059-0.087 |
+| 2 | 499 | 0.404 | +0.008 +- 0.006 (499) | 0.199 | 24 | 1271 / 285 | 65.6k / 55.2k | 11-20 | 0.067-0.096 | 0.0129-0.0151 | 0.054-0.077 |
+
+B - C: v1 +0.003 +- 0.006 (509), v2 +0.005 +- 0.006 (479).
+
+**A: LR 1e-5, prompt_mean, frozen router + mamba** (`nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121`)
+
+| visit | groups | reward | vs base | ctx | median turns | reply tok/turn | end ctx | steps | entropy | gap | grad norm |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 484 | 0.381 | -0.011 +- 0.006 (484) | 0.194 | 20 | 1437 / 300 | 62.8k / 49.6k | 1-9 | 0.056-0.064 | 0.0116-0.0177 | 0.057-0.084 |
+| 2 | 511 | 0.363 | -0.033 +- 0.008 (511) | 0.324 | 20 | 1965 / 300 | 74.5k / 69.0k | 10-18 | 0.064-0.079 | 0.0126-0.0175 | 0.056-0.076 |
+
+A - C: v1 -0.006 +- 0.006 (482), v2 -0.035 +- 0.007 (489).
+
+Visits completed: C 5; E 3 plus a partial visit 4; D2 stopped in visit 3; A and B after visit 2. D (attempt 1,
+`nemo-jup-cf-rv512-b32-lr4e-6-ris-nofrz-r3-1122`) trained 1 step and is not used.
+
+JUPITER's summary of the rv512 results, in its words:
+
+- Only the frozen router + mamba arms improve over base. C peaks at +0.022 +- 0.006 (v4) and E at +0.024 +- 0.007
+  (v3), with E's partial v4 at +0.035 +- 0.008.
+- E sits about +0.013 above C from visit 3, but its replies are longer and its ctx share grows.
+- Unfreezing the router (D2) or only the mixers (B) brings no gain. D2's entropy and reply length run away by visit 3.
+- LR 1e-5 (A) is negative by visit 2.
+- No arm moved far from base: the largest gain is a few hundredths on a ~0.39 base.
