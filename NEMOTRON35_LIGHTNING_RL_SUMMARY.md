@@ -174,9 +174,9 @@ runs out of context on more of the rest. Trials at >= 240 of 250 turns stayed at
 | `nemo-jup-cf-v2-b32-lr4e-6-ris-rfrz-r3-1121` | - | R3, mixers trained, full set | 15, stopped | +0.012 +- 0.014 vs frozen at 11-15; entropy 0.075 vs 0.060 |
 | rv512 A `nemo-jup-cf-rv512-b32-lr1e-5-ris-frz-r3-1121` | - | **1e-5**, prompt_mean, R3, frozen, 512 tasks | 19, stopped | visit 2 vs base -0.033 +- 0.008; A - C -0.035 +- 0.007 |
 | rv512 B `...-lr4e-6-ris-rfrz-r3-1121` | - | 4e-6, router only frozen | 21, stopped | B - C at visit 2 +0.005 +- 0.006; entropy 0.067 -> 0.087 |
-| rv512 C `...-lr4e-6-ris-frz-r3-1121` (reference arm) | - | 4e-6, prompt_mean, R3, frozen | 51+, **stop requested 11-23** | vs base: -0.006, +0.003, +0.012 +- 0.006, **+0.022 +- 0.006 (visit 4)**; context share flat 0.16-0.17; entropy 0.073-0.088 at steps 42-51 |
+| rv512 C `...-lr4e-6-ris-frz-r3-1121` (reference arm) | - | 4e-6, prompt_mean, R3, frozen | 51, **killed 11-23** | vs base: -0.006, +0.003, +0.012 +- 0.006, **+0.022 +- 0.006 (visit 4)**; context share flat 0.16-0.17; entropy 0.073-0.088 at steps 42-51 |
 | rv512 D2 `...-lr4e-6-ris-nofrz-r3-1122b` | - | 4e-6, **nothing frozen**, R3 | 23, entropy guard | D2 - C: +0.001 +- 0.005, +0.001 +- 0.006, -0.025 +- 0.011 (partial); context share 0.165 -> 0.231 -> 0.317; entropy 0.055 -> 0.115; fewer, much longer replies |
-| rv512 E `...-lr4e-6-ris-frz-r3-seqm-1122` | - | 4e-6, **sequence_mean**, R3, frozen | 35+, **stop requested 11-23** | vs base: -0.001, +0.005, +0.024 +- 0.007, +0.038 +- 0.008 (visit 4, partial 363 tasks); E - C +0.013 +- 0.006 at visit 3; context +0.022 +- 0.006; 7 fewer turns, +341 reply tokens per turn; entropy flat 0.061-0.065 |
+| rv512 E `...-lr4e-6-ris-frz-r3-seqm-1122` | - | 4e-6, **sequence_mean**, R3, frozen | 35, **killed 11-23** | vs base: -0.001, +0.005, +0.024 +- 0.007, +0.038 +- 0.008 (visit 4, partial 363 tasks); E - C +0.013 +- 0.006 at visit 3; context +0.022 +- 0.006; 7 fewer turns, +341 reply tokens per turn; entropy flat 0.061-0.065 |
 
 Horizon's own final table (every run and eval with its W&B ids, checkpoint locations and code changes) is appendix
 B. JUPITER's final table was requested at the kill; see section 11 and appendix C.
@@ -313,8 +313,9 @@ step 115. Slower serving costs about 0.03 on this eval (agent timeouts).
   45 verified in S3. The planned sixth visit and the held-out probe of the prompt_mean run were not done.
 - **Horizon**: resume job and the step-75 eval job of the sequence_mean twin cancelled; watchers stopped; 0 labelled
   sandboxes; twin ends at checkpoint 58.
-- **JUPITER**: stop of arms C and E, cancellation of the queued chain links, and sandbox cleanup were requested at
-  21:14 PST; confirmation and the final per-visit table were not yet in when this file was first written.
+- **JUPITER**: confirmed 06:31 CET 11-24. Arms C and E stopped by PID at checkpoints 51 and 35 (C's visit 5 is its
+  last complete visit); all 8 running, queued and held jobs cancelled; 726 labelled Dune sandboxes deleted, 0 left;
+  proxy stopped; checkpoints, trial directories and logs kept. Its final per-run table is being compiled (appendix C).
 - Never done: a TB2.1 eval of any repeat-visit checkpoint (Lila checkpoint 61 has the largest training-task gain,
   +0.057, and +0.031 held-out); a run with exact train / inference consistency (the vLLM blog's approach); a larger
   batch at the same LR (NVIDIA's recipe uses 512 prompts per step); raising the 16,384 reply cap in eval.
@@ -891,5 +892,6 @@ Horizon arm beats base by more than ~2 SE.
 
 ## Appendix C. JUPITER's final table
 
-Requested from the JUPITER session at the kill (2026-11-23 21:14 PST). Not received when this version was pushed;
-this section is replaced when it arrives. Until then, section 5c holds the JUPITER numbers as logged on Lila.
+JUPITER confirmed the kill at 06:31 CET 11-24 and is compiling its table (31 run directories since 11-16: W&B ids,
+recipes, steps, checkpoint paths, end reasons, per-visit readouts, code changes). Not received when this version was
+pushed; this section is replaced when it arrives. Until then, section 5c holds the JUPITER numbers as logged on Lila.
