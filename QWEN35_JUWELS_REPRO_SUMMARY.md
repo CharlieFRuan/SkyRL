@@ -31,16 +31,18 @@ Numbers are copied from those. "+-" or "SE" is one standard error over the 89 ta
 
 ## 2. Status on 2026-11-24 (answer to "are the runs cancelled, are the nodes in maintenance")
 
-From the JUWELS session's reports of 04:17 CET 11-24 (L2690) and its reply in appendix A; not checked independently
-from Lila, and the public JSC status page could not be read by an automated fetch.
+From the JUWELS session's status report of 06:47 CET 11-24 (appendix A1, clock read on JUWELS). Not checked
+independently from Lila; the public JSC status page could not be read by an automated fetch.
 
 - Training: stopped at 120 trained steps at 19:29 CET 11-23; not to be resumed unless the owner asks.
 - Evals: all nine finished (last one, checkpoint 100, on 11-24 about 04:00 CET).
-- Slurm: the node hold was cancelled; nothing of this project is running or queued.
+- Slurm: squeue is empty (nothing running, pending or held); the last node hold was cancelled at 04:15 CET 11-24.
 - Sandboxes: 0 with a JUWELS run label on Dune and on both Daytona orgs; the login-node proxy is stopped.
-- Maintenance: JUWELS Booster is announced down from 2026-11-24 09:00 CET to 2026-11-30 09:00 CET (as reported by
-  the JUWELS session). The JUWELS session may be unreachable in that window. Checkpoints and logs stay on the
-  JUWELS filesystem.
+- Maintenance: JUWELS Booster is down from 2026-11-24 09:00 CET to 2026-11-30 09:00 CET (software updates and a
+  Slurm upgrade to 25.11), per the login message of the day and the Slurm reservation `maint_booster`. At 06:47 CET
+  on 11-24 it had not started. The JUWELS session may be unreachable in that window.
+- Nothing was uploaded from JUWELS. **The 26 checkpoints (117 GB each) exist only on JUWELS scratch, which removes
+  files not used for 90 days (late February 2027).**
 
 ## 3. Where the earlier Qwen3.5-9B context is
 
@@ -166,17 +168,17 @@ Reference values for the same diagnostics, measured from the 11-16 trial archive
 | | Lila reference | JUWELS |
 |---|---|---|
 | GPUs | Lila: an Anyscale Ray cluster of 8-GPU nodes (layout in `handoff/BRIEF.md` and `run_rl.sh`) | JUWELS Booster, A100-40GB x 4 per node, 28 nodes |
-| Trainer | as set by `run_rl.sh` (not re-read for this file) | 8 nodes = 4 x (Megatron TP4 x CP2), CPU optimizer offload |
-| Rollout engines | vLLM engines on the remaining nodes | 20 vLLM engines x TP4 |
+| Trainer | as set by `run_rl.sh` (not re-read for this file) | 8 nodes = 4 replicas x (Megatron TP4 x CP2), Adam state offloaded to host memory: a 128k-token row does not fit 40 GB with TP4 alone |
+| Rollout engines | vLLM engines on the remaining nodes | 20 vLLM engines x TP4 (8 and 10 engines collapsed from KV-cache eviction at 500 trials in flight) |
 | Trials in flight | cap 900 | 500 |
-| Step time | not re-measured here (W&B timing series of `c0gc5h63` / `0gu2cvvl`) | about 23 min (policy_train about 15 min) |
+| Step time | 15-22 min (training pass 12-13.5 min) | mean 30 min incl. restarts and epoch ends; typical 23-35 min (training pass 11-23 min) |
 | Job length | no limit | 24 h Slurm limit: daily restart from the last checkpoint |
 | Sandboxes, training | Daytona RL org | Dune first (abandoned after the 11-21 outages), then the Daytona RL org |
 | Sandboxes, evals | Dune | Dune |
 | Eval serving | one node per eval: trainer on 2 GPUs + 3 engines x TP2; 92-115 tokens/s | 5 engines per eval (61-87 tokens/s) or 12 engines (105 tokens/s) |
 | Length | 2 epochs (104 steps) | 2 epochs + 16 steps of a third (120 steps) |
 
-Exact layout, memory limits and launch lines on JUWELS: appendix A.
+Exact layout, memory limits, costs and the full run list with W&B ids: appendix A2 and A3.
 
 ## 8. The third-epoch looping failure (found on JUWELS; the reference run stopped before it could appear)
 
@@ -223,29 +225,268 @@ Exact layout, memory limits and launch lines on JUWELS: appendix A.
   every sandbox with owner and run; delete only by both labels; no image builds or new snapshots on the RL org;
   TB2.1 cannot run on the RL org, so evals went to Dune.
 - **Checkpoints** are 117 GB each on JUWELS; kept: every multiple of 5 up to 120, plus 52 and 104 (the two epoch
-  ends). Paths: appendix A.
+  ends). Scratch only, 90-day removal; paths in appendix A2.
+- **JUWELS specifics**: compute nodes have no internet (a CONNECT proxy on a login node carries sandbox, W&B and
+  storage traffic); the venv is unpacked to /dev/shm on every node; a 3-epoch run writes millions of trial files
+  and exhausted the first scratch project's inode quota on 11-22 (finished trial dirs are now packed into tar
+  archives); 24 h job limit, each daily restart costs the in-flight rollouts (the next step took 72-83 min).
 
 ## 10. Open items, and what to do first when the cluster is back (after 2026-11-30 09:00 CET)
 
 1. Nothing needs restarting: the run is complete for its purpose. Do not resume training past 120 unless the owner
    asks; if a longer run is wanted, stop at the end of epoch 2 or add a stop rule on the share of trials at the turn
    limit and on parse errors.
-2. Decide where the checkpoints go (they exist only on the JUWELS filesystem unless appendix A says otherwise). The
-   end-of-epoch-2 checkpoint (104) is the one to keep and build on.
+2. **Copy the checkpoints worth keeping off JUWELS scratch before late February 2027** (90-day removal; nothing was
+   uploaded). The end-of-epoch-2 checkpoint (`global_step_104`) is the one to keep and build on; 100 is the last
+   one before the looping shows in training.
 3. Re-run the evals of 100, 110 and 120 with 12 engines if a clean third-epoch curve is wanted (they were served
-   slowly, worth about 0.03).
+   slowly, worth about 0.03). For any comparison with the Lila numbers use 12 engine nodes per eval.
 4. Push the fixes that are still local: `bound_session_calls` (JUWELS), the Daytona task conversion scripts and the
    two sandbox patches (Lila). Commit or push only on the owner's word.
 5. Open question for the owner: whether the two-run limit on the Daytona RL org also covers evals on the Daytona
    eval org (never answered; JUWELS ran its evals on Dune instead).
 6. Investigate the third-epoch looping failure before any recipe with more than two epochs.
+7. The owner's stop at 120 steps reached JUWELS only as a relay through Lila; the JUWELS session acted on it but
+   notes that it was never typed there. First steps on JUWELS after the maintenance are listed in appendix A6.
 
 ---
 
-## Appendix A. The JUWELS session's own account
+## Appendix A. The JUWELS session's own account (written 2026-11-24 06:47 CET, in three parts)
 
-Requested from the JUWELS session on 2026-11-24 06:46 CET (status re-check, exact cluster layout and launch lines,
-run names with W&B ids for the evals, checkpoint paths, code and script changes with their git state, its own log
-paths). Not received when this version was pushed; the Booster maintenance starts at 09:00 CET the same day, so it
-may arrive only after 2026-11-30. This section is replaced when it arrives. Everything above comes from the reports
-the JUWELS session sent to Lila while the work was running.
+Copied as received. `$WORK`, `$SCR` and `$SCR_OLD` are placeholders for the project's work and scratch directories on
+JUWELS; the same text is saved there as `$WORK/JUWELS_QWEN_REPRO.md` (19 KB). No keys, hosts, addresses, account
+names or task names are included.
+
+### A1. Status at 2026-11-24 06:47 CET (clock read on JUWELS)
+
+- **Jobs**: none. squeue is empty (nothing running, pending or held). The last hold was cancelled at 04:15 on Nov 24;
+  no Booster node is allocated or reserved by us. sacct: every job since Nov 18 is CANCELLED (by the session) or
+  FAILED (one 0-second dev job on Nov 20).
+- **Maintenance**: Booster is in maintenance from 2026-11-24 09:00 to 2026-11-30 09:00 CET (software updates and a
+  Slurm upgrade to 25.11). Sources: the login message of the day and the Slurm reservation `maint_booster` with
+  exactly those start and end times. At 06:47 it had not started yet (186 nodes allocated to other users, 133 idle).
+  Breaking change announced: with Slurm 25.11 a job with only `--gpus-per-task` fails; `--gres=gpu:X` is needed. The
+  hold script already uses `--gres=gpu:4` and no srun line uses `--gpus-per-task`.
+- **Training**: stopped at 120 trained steps on Nov 23 19:29 (instruction relayed through the Lila session: two
+  epochs are enough, run the evals). Not to be relaunched unless the owner asks.
+- **Sandboxes**: 0 with a JUWELS run label on Dune (count after the last cleanup, 04:15) and 0 on both Daytona orgs
+  (census 04:15).
+- **Login-node proxy**: stopped at 04:15.
+- **Uploads**: none. No checkpoint or dataset was uploaded from JUWELS (no HF upload); metrics are on W&B only.
+
+### A2. The reproduction
+
+**Cluster layout**
+
+| Part | JUWELS Booster | Why it differs from the B200 setup |
+|---|---|---|
+| Node | 4 x A100-40GB, 48 cores, 503 GiB | |
+| Training run | 28 nodes = 112 GPUs, 24 h job limit | |
+| Trainer | 8 nodes = 4 replicas, each Megatron TP4 x CP2 (2 nodes per replica), Adam state offloaded to host memory (optimizer_cpu_offload, fraction 1.0, precision-aware optimizer) | A 128k-token row does not fit 40 GB with TP4 alone (36 GB peak and growing); TP4 x CP2 peaks at 26.8 GB per GPU. The launcher's Qwen3.5 family has no optimizer offload because B200s do not need it |
+| Engines | 20 nodes, one vLLM engine with TP4 per node, gpu_memory_utilization 0.80, 262,144 context | With 500 trajectories in flight the KV cache must hold about 500 live contexts. 8 engines at 0.65 and 10 engines at 0.80 both collapsed after 20-30 min (prefix eviction); 20 engines ran at 23-28% KV use, 97% prefix-cache hits, nothing waiting |
+| Eval runs | 7 nodes each (2 trainer nodes that only load the checkpoint + 5 engines), or 14 nodes (2 + 12 engines); 110 trials in flight | Separate steps on a hold |
+| Network | Compute nodes have no internet; an outbound CONNECT proxy on a login node carries sandbox, W&B and storage traffic | |
+| Storage | venv unpacked to /dev/shm on every node (imports from the parallel file system take 83 s per process, 12 s from RAM); run dirs on scratch | The first scratch project ran out of inodes on Nov 22 (a 3-epoch run writes millions of trial files); run dirs moved, finished trial dirs are packed into tar archives |
+
+Environment deviations from uv.lock: vllm-router wheel retagged for glibc 2.34; nvidia-cuda-nvcc / crt / nvvm pinned
+to 13.0.88 (the first training step fails otherwise); ray[default] for GPU metrics.
+
+**Recipe (the Lila Qwen3.5-9B batch-32 recipe, unchanged)**
+
+| Setting | Value |
+|---|---|
+| Model | Qwen3.5-9B (public weights) |
+| Trainer | fully async, `run_fully_async_terminus.sh` through `juwels/run_rl_juwels.sh` |
+| Batch | 32 groups x 16 trajectories, sample_full_batch, zero-variance groups dropped |
+| LR | 2e-6 |
+| Loss | DPPO (delta_low = delta_high = 0.15), prompt-mean loss reduction, as in the launcher |
+| Max staleness | 3 steps |
+| In flight | 500 trajectories, 3 started per second |
+| Context | trainer 131,072 tokens; engines 262,144 |
+| Reply cap | 16,384 tokens per turn |
+| Agent | Terminus (installed in the sandbox), 250 turns max, 3,600 s agent limit, no summarization, timeouts trained on |
+| Sampling | temperature 1.0, top_p 1.0, top_k off, min_p 0 (train and eval) |
+| Epochs | 3 planned; stopped in the third |
+| Checkpoints | every 5 steps, plus epoch ends |
+| In-run evals | none (owner's choice); checkpoints evaluated afterwards |
+| Sandboxes | steps 1-15 of the first long run on Dune; the reported run on the Daytona RL org (converted task set: base snapshot + per-task setup script, no image builds) |
+| Task set | CalibForge v2: 2,788 tasks on Dune; the Daytona conversion has 2,598. Nominal 81 steps per epoch, but about 37% of groups are dropped by sample_full_batch, so an epoch ends after about 51-52 steps |
+| Eval | Terminal-Bench 2.1 (89 tasks) x 5 passes on Dune, through the SkyRL entrypoint (EVAL_BEFORE_TRAIN=true, resume from the checkpoint) |
+
+**Runs (W&B project `sky-posttraining-uc-berkeley/skycap-calibforge-fully-async`)**
+
+| Run | W&B id(s) | Dates (CET) | Steps | Checkpoints | Why it ended |
+|---|---|---|---|---|---|
+| `qwen35-cf-v2-juw-smoke2-1120`, `...-b32-lr2e-6-e2e-1120`, `-e2e2-`, `-e2e3-` | 4i11a0yu, 2ibxu4nj, q1a93c2g, 9smy5i4v | Nov 20 | 0-1 | none kept | Bring-up: engine count and memory layout (8 and 10 engines collapsed) |
+| `qwen35-cf-v2-juw-b32-lr2e-6-e2e4-1120` | zdrrfumb, ekvqlkmg | Nov 20 | 3 (step-0 TB2.1 x3: 0.2322, pass@3 0.3596) | global_step_2 | Validation of the recipe on 28 nodes incl. checkpoint + resume; done |
+| `qwen35-cf-v2-juw-3600-cap16k-t1-b32-lr2e-6-1120` (Dune) | s90fdctg, wsc6gsv9 | Nov 20 21:37 - Nov 21 05:12 | 15 (mean reward 0.422; Lila 0.420) | 5, 10, 15 | Dune sandbox DNS outage on Nov 21 from 04:29; owner: switch to Daytona, start fresh |
+| `qwen35-cf-v2-juw-daytona-ramp300-1121`, `-dtn-smoke5-`, `-dtn-smoke5b-`, `-dtneval-smoke3-`, `-dtneval-smoke3b-` | n716dibk, ri6mxc07, 4roapcxa, 14gq9hpo, 381yty15 | Nov 21 | 0 | none | Daytona smokes (relay over preview URLs through the proxy) |
+| **`qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121`** (Daytona; the reported run) | **lt61lhgd** (steps 1-45), eu12glcn (46-80), f135co7d (restart that hit the inode quota), 8oi0b4ee (81-120) | Nov 21 06:16 - Nov 23 19:29 | **120** | every 5 from 5 to 120, plus 52 and 104 (epoch ends; global_step_104 = 103 trained steps = end of epoch 2). 117 GB each, 26 in all | Stopped on the owner's relayed instruction; Booster maintenance from Nov 24 |
+
+Checkpoint paths: `$SCR/runs/qwen35-cf-v2-juw-daytona-b32-lr2e-6-1121/ckpts/global_step_N` (N <= 80 are symlinks into
+`$SCR_OLD/runs/<same run>/ckpts/`). **Scratch only; the site removes scratch files not used for 90 days.**
+
+**Evals (TB2.1 x5 on Dune; run dirs `$SCR/runs/<run>`, base under `$SCR_OLD/runs` + a tar archive)**
+
+| Run | W&B id | Checkpoint | Engines | Finished |
+|---|---|---|---|---|
+| `qwen35-cf-v2-juw-eval-base-x5-1120` | 6ag9xhev | base | 12 | Nov 21 |
+| `qwen35-cf-v2-juw-eval-step25-x5-1123` | p1grpmkw | 25 | 5 | Nov 23 21:39 |
+| `...-step50-x5-1123` | fork0zup | 50 | 5 | Nov 23 22:48 |
+| `...-step75-x5-1123` | rz5moazz | 75 | 5 | Nov 23 22:53 |
+| `...-step100-x5-1123` | zi5j2ds9 | 100 | 5 | Nov 24 04:14 |
+| `...-step104-x5-1123` | x8uya1hq | 104 | 5 | Nov 23 21:36 |
+| `...-step104-r2-x5-1123` | ibvowikc | 104 (same-config repeat) | 5 | Nov 24 01:22 |
+| `...-step104-e12-x5-1123` | aq12u40u | 104 (serving-speed test) | 12 | Nov 24 02:45 |
+| `...-step110-x5-1123` | vq1bd1oz | 110 | 5 | Nov 24 01:12 |
+| `...-step115-x5-1123` | 0mb258o6 | 115 | 5 | Nov 23 23:32 |
+| `...-step120-x5-1123` | nx6eqk3c | 120 | 5 | Nov 23 23:55 |
+
+### A3. Differences from the Lila run and what they cost
+
+| | JUWELS (112 A100-40GB) | Lila |
+|---|---|---|
+| Step time | mean 30 min over 120 steps (wall time incl. restarts and epoch ends); typical step 23-35 min | 15-22 min |
+| Training pass | 11-23 min (670-1,360 s; grows with batch length, 49k -> 90k tokens per trajectory), 25-36k tok/s | 12-13.5 min |
+| Rollout wait per step | 2-17 min normally | |
+| Restarts | 24 h job limit: a new hold and relaunch every day (Nov 22 01:43 at step 45, Nov 22 21:23 at step 80). Each costs the in-flight rollouts: the next step took 83 min and 72 min. One extra relaunch when the scratch project ran out of inodes | none forced |
+| Epoch ends | the epoch-boundary wait plus the first step of the new epoch took 2 h 03 min and 1 h 26 min | |
+| Sandboxes | Dune for the first 15 steps (outage), then the Daytona RL org for the reported run; all through a login-node proxy | Daytona |
+| Eval serving | 5 engines per eval: 5.3-5.8 s per model call at checkpoints 25 / 50 / 75 / 115, but 8.3-9.5 s (61-65 tok/s) at 100 / 104 / 110 and 7.1 s at 120. 12 engines: 5.42 s at 105 tok/s | 5.38 s, 105 tok/s |
+| Cost of slow eval serving | about +0.030 avg (SE 0.015) at checkpoint 104 between 5 and 12 engines, through agent timeouts (37 and 27 vs 20) | |
+| Compute | about 61 h x 28 nodes for the 120 steps; the eval hold used about 270 node-hours (28 nodes for 9.2 h, then 8 for 1.5 h) | |
+
+### A4. Results
+
+**TB2.1 x5 per checkpoint** (Dune, 89 tasks, 445 trials; avg = mean per-task score; a trial that hit the 1 h agent
+limit counts 0)
+
+| Checkpoint | Engines | avg | pass@5 | Lila avg / pass@5 | Agent timeouts | Out of context | Cap hits (16,384) | Trials at >= 240 turns | "No valid JSON found" share of turns | Model call (tok/s) | Wait asked per tool step |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| base | 12 | 0.2472 | 0.4270 | - | 44 | n/a | 0 | 4.5% | 0.69% | 6.98 s (84) | 10.2 s |
+| 25 | 5 | 0.2629 | 0.4831 | 0.2787 / 0.4831 | 84 | 5 | 0 | 4.9% | 0.94% | 5.25 s (87) | 12.5 s |
+| 50 | 5 | 0.3236 | 0.5169 | 0.2989 / 0.4831 | 93 | 4 | 0 | 8.3% | 1.17% | 5.51 s (81) | 11.6 s |
+| 75 | 5 | 0.3236 | 0.4382 | 0.3281 / 0.4944 | 56 | 0 | 0 | 3.3% | 1.14% | 5.80 s (86) | 11.6 s |
+| 100 | 5 | 0.3303 | 0.5169 | - | 38 | 10 | 0 | 10.5% | 2.97% | 9.51 s (61) | 7.1 s |
+| 104 (end of epoch 2) | 5 | 0.3236 | 0.5281 | 0.3461 / 0.5281 (final) | 37 | 4 | 0 | 9.2% | 5.42% | 8.7 s (65) | 7.2 s |
+| 104 repeat | 5 | 0.3483 | 0.5056 | same | 27 | 3 | 0 | 11.9% | 6.59% | 8.92 s (63) | 6.9 s |
+| 104, matched serving speed | 12 | **0.3663** | 0.5169 | same | 20 | 6 | 0 | 11.6% | 6.69% | 5.42 s (105) | 7.1 s |
+| 110 | 5 | 0.3213 | 0.5056 | - | 23 | 0 | 0 | 23.9% | 23.7% | 8.27 s (61) | 6.5 s |
+| 115 | 5 | 0.3056 | 0.4831 | - | 4 | 0 | 0 | 41.7% | 46.8% | 5.36 s (65) | 6.1 s |
+| 120 | 5 | 0.3236 | 0.4831 | - | 14 | 2 | 0 | 19.1% | 12.8% | 7.10 s (67) | 5.9 s |
+
+- Setup failures: 0 in every eval. The Lila reference evals: agent timeouts 29 / 30 / 26 / 25, trials at the turn
+  limit 4.9-6.7%, "No valid JSON found" 0.3-0.7% of turns at the four checkpoints.
+- Noise: two same-config 5-pass evals of checkpoint 104 differ by +0.0247 (SE 0.0197). Pooled 15 passes at 104:
+  0.3461. The equal averages 0.3236 at 50 / 75 / 104 / 120 are real (144 solved trials of 445 each time, different
+  tasks).
+- Timeouts at 25-75 come from the policy asking for long waits per tool step (the base model's habit, 10.2 s);
+  sandbox overhead beyond the requested wait is 0.01-0.08 s per tool step.
+- Reading: the Lila curve (base to about 0.33-0.35 after two epochs) is replicated within 5-pass noise; at matched
+  serving speed the JUWELS end-of-epoch-2 checkpoint is above Lila's final. The third epoch added no score.
+
+**Training side (kept-batch mean reward, 10-step windows)**
+
+| Steps | Reward | Lila, same steps | Entropy | Grad norm | Rollout-trainer logprob gap | Step time | Tokens per trajectory |
+|---|---|---|---|---|---|---|---|
+| 1-10 | 0.441 | 0.396 | 0.437 | 0.045 | 0.0107 | 1,591 s | 53.9k |
+| 11-20 | 0.421 | 0.418 | 0.368 | 0.044 | 0.0102 | 1,443 s | 58.5k |
+| 21-30 | 0.421 | 0.447 | 0.344 | 0.040 | 0.0101 | 1,525 s | 62.8k |
+| 31-40 | 0.463 | 0.446 | 0.348 | 0.039 | 0.0106 | 1,482 s | 72.1k |
+| 41-50 | 0.454 | 0.444 | 0.322 | 0.033 | 0.0096 | 1,990 s | 82.2k |
+| 51-60 | 0.504 | - | 0.303 | 0.048 | 0.0091 | 2,063 s | 78.1k |
+| 61-70 | 0.480 | - | 0.298 | 0.031 | 0.0093 | 1,716 s | 83.4k |
+| 71-80 | 0.495 | - | 0.324 | 0.032 | 0.0100 | 1,788 s | 78.2k |
+| 81-90 | 0.505 | - | 0.343 | 0.032 | 0.0104 | 1,875 s | 76.8k |
+| 91-100 | 0.465 | - | 0.340 | 0.029 | 0.0103 | 1,836 s | 89.2k |
+| 101-110 | 0.538 | - | 0.379 | 0.033 | 0.0111 | 1,975 s | 72.1k |
+| 111-120 | 0.483 | - | 0.399 | 0.062 | 0.0145 | 1,980 s | 51.6k |
+
+(The "Lila, same steps" column is from the per-step CSV of the Lila Daytona run, steps 1-50.) Mean over 120 steps
+0.472 (Lila 0.430 over its first 50 steps, about 0.45 over 51-104). Epoch means: first (1-51) 0.439, second (52-103)
+0.493, third so far (104-120) 0.509. Entropy fell to about 0.30 in the second epoch and rose again from step 81, to
+0.40 in the third epoch; grad norm 0.14 / 0.12 / 0.08 at steps 116-118 and the logprob gap rose to 0.017-0.025 at
+117-119.
+
+**Third-epoch looping failure**
+
+From policy step 104 on the model increasingly samples its end token in the middle of a reply (finish reason
+"stop"). Terminus rejects the reply ("No valid JSON found"), the retry is cut again, and the trial runs to the
+250-turn limit with reward near 0. Per policy step in training (share of replies cut / share of trials at >= 240
+turns; final counts, slightly different from the interim table in section 8):
+
+| Policy steps | Replies cut | Trials at >= 240 turns |
+|---|---|---|
+| 81-100 | 0.04-0.8% | 0-1.2% |
+| 104 | 2.8% | 1.5% |
+| 105-109 | 6-12% | 2-7% |
+| 110-112 | 15-26% | 9-19% |
+| 113-115 | 31-32% | 21-24% (peak) |
+| 116 | 26.8% | 13.6% |
+| 117 | 18.7% | 8.7% |
+
+At eval (table above) the same shape: 9-12% of trials at the turn limit at 104, 24% at 110, 42% at 115, 19% at 120;
+checkpoint 100 already shows 10.5% of trials and 3.0% of turns. The trials that do not loop keep improving (about
+0.51 mean at 115, 0.40 at 120, 0.36 at 104), so the policy got better on what it completes while the looping removed
+up to 42% of the trials. It does not depend on serving speed (11.6% with 12 engines). Cause not established;
+candidates are the entropy rise of the third epoch and trained cut replies reinforcing themselves (the end-token
+logprob goes from -6 at a first cut to -1 to -4 once cut replies are in the context).
+
+### A5. Code and script changes on JUWELS
+
+SkyRL checkout: branch `charlie/calibforge-rl-1115`, HEAD `aada336d`, remote = the public fork. Nothing committed or
+pushed from JUWELS; 9 files are modified in the working tree (189 insertions, 24 deletions). No diff file was
+exported (no outgoing transfer from JUWELS besides these messages); the changes are small enough to re-apply from
+this table, and the two that came from Lila / JUPITER exist there too.
+
+| File | Change |
+|---|---|
+| `harbor_skycap/fast_exec.py` | `bound_session_calls()`: 120 s limit (`SKYCAP_SESSION_CALL_TIMEOUT_SEC`, 0 disables) wrapped around the provider SDK's `create_session` / `get_session_command`. Harbor passes these calls no timeout; a sandbox whose toolbox stopped answering held its trial forever, and with sample_full_batch the epoch then never ended |
+| `harbor_skycap/outage_guard.py`, `harbor_generator.py` | Environment failures (tmux missing after the agent install, sandbox start / agent setup timeout, relay stub not started, runner install failed, agent install timeout with exit 124) go back to the gate uncounted, at most `SKYCAP_ENV_RETRIES=3` times per trial (JUPITER's patch, extended by the message-matched cases) |
+| `harbor_skycap/terminus_installed.py` | TmuxMissingError after the agent install instead of a silent 0-reward trial (JUPITER's patch) |
+| `harbor_skycap/daytona_setup.py` | `SKYCAP_APT_MIRROR`: point Ubuntu sources at a mirror before the task setup (Lila's patch) |
+| `harbor_skycap/sandbox_relay/manager.py` | `trust_env=True` so the relay manager's HTTP session uses the proxy |
+| `skyrl/backends/skyrl_train/workers/worker.py` | NUMA: prefer local memory (numa_set_preferred) instead of a strict bind (a strict bind got checkpoint loading OOM-killed) |
+| `harbor_skycap/run_fully_async_terminus.sh`, `run_sync_terminus.sh` | MODEL_FAMILY switch (qwen3.5 / nemotron-3.5) and env knobs for GPUs per node (4 here, was fixed at 8) and Megatron context-parallel / expert-parallel sizes (were fixed at 1) |
+
+(`harbor_skycap/` = `examples/train_integrations/harbor_skycap/`.)
+
+JUWELS-only scripts in `$WORK` (not in any repo):
+
+| Script | Purpose |
+|---|---|
+| `juwels/hold_nodes.sbatch`, `calibforge_juw.sh`, `ray_cluster.sh`, `run_rl_juwels.sh` | hold nodes, start Ray inside the hold, launch training (PROVIDER=dune / daytona / daytona_eval, RESUME_PATH) |
+| `juwels/eval_ckpt_juw.sh`, `eval_launch_juw.sh` | checkpoint eval on separate nodes of a hold (SUFFIX, NODES_CSV) |
+| `juwels/eval_report.py`, `eval_timing.py`, `eval_summary.py`, `ops/eval_caps.py` | per-eval report: score, endings, timeouts, cap hits, turn-limit share, "No valid JSON found" share, seconds per model call / tool step |
+| `juwels/step_table.sh`, `trial_stats.py`, `rl_status.sh`, `engine_trend.sh`, `pack_trials.sh` | per-step table, trial statistics, engine load, packing trial dirs into tar archives |
+| `ops/dune_cleanup.py`, `dune_probe.py`, `make_daytona_tasks_v2.py`, `build_nemo_env.sh`, `stage_venv_tar.sh` | sandbox cleanup by owner + run label, provider probe, Daytona task conversion, env build, venv staging |
+| `relay/login_services.sh` | the login-node CONNECT proxy (start / stop / status) |
+| looping diagnostics | session scratch scripts (early-stop share per policy step from the SkyCap records; trials at the turn limit by start hour), not kept in `$WORK`; their results are in `FINDINGS.md` there and in A4 |
+
+### A6. Open, and what to do first after Nov 30 (the JUWELS session's list)
+
+1. The owner has not confirmed in the JUWELS session itself the relayed instruction to stop at 120 steps (the
+   session acted on it; training stays stopped).
+2. Decide whether to continue: more training from global_step_100 / 104 (before the looping) or 120, with a change
+   against the early end token (not designed yet), under a new run name containing "juw". Not started.
+3. Matched-speed evals (12 engines) exist only for checkpoint 104; 25 / 50 / 75 / 100 / 110-120 ran with 5 engines.
+   For comparisons with the Lila numbers use 12 engine nodes per eval.
+4. Local SkyRL patches are uncommitted; commit or push only when the owner asks.
+5. First steps after the maintenance: read `$WORK/PLAN.md` (tail) and `$WORK/FINDINGS.md`; sbatch a hold
+   (`--gres=gpu:4` is already there); start the proxy (the login node may differ; it writes a new proxy env file);
+   provider probe; then `juwels/eval_launch_juw.sh <hold> <offset> <count> <N> 110`, or a training launch.
+6. **Checkpoints are on scratch only (117 GB each, 26 of them); copy the ones worth keeping before the 90-day limit
+   (late February 2027).**
+
+### A7. Log and result files on JUWELS
+
+| File | Size | Content |
+|---|---|---|
+| `$WORK/PLAN.md` | 152 KB, 535 lines | dated log of every action, Nov 16 - Nov 24 |
+| `$WORK/FINDINGS.md` | 51 KB, 90 lines | results table (one row per finding / eval / 5-step training window) |
+| `$WORK/READY.md` | 7.6 KB | the validated launch recipe of Nov 20 |
+| `$WORK/JUWELS_QWEN_REPRO.md` | 19 KB | this account |
+| `$SCR/logs/<run>.log`, `.jobs`, `_step.log` | per run | driver log (contains trajectory text: private), job notes |
+
+The JUWELS session's memory notes hold the absolute roots, the Slurm account and the cluster quirks; they stay on
+JUWELS.
